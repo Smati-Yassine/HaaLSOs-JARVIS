@@ -71,6 +71,11 @@ button { cursor: pointer; }
 .ask input { flex: 1 1 auto; min-width: 0; background: transparent; border: 0; padding: 8px 0; font-size: 1.05rem; }
 .ask input:focus { outline: 0; }
 .ask input::placeholder { color: var(--mute); }
+.mic { flex: none; width: 38px; height: 38px; display: grid; place-items: center; background: transparent; color: var(--ink); border: 1px solid var(--hair); border-radius: 50%; transition: border-color 0.2s, color 0.2s; }
+.mic:hover:not(:disabled) { border-color: var(--ink); }
+.mic svg { width: 17px; height: 17px; }
+.mic:disabled { opacity: 0.35; cursor: default; }
+.mic[aria-pressed="true"] { color: var(--alarm); border-color: var(--alarm); }
 .send { flex: none; width: 38px; height: 38px; display: grid; place-items: center; background: transparent; color: var(--ink); border: 1px solid var(--hair); border-radius: 50%; transition: border-color 0.2s; }
 .send:hover { border-color: var(--ink); }
 .send svg { width: 17px; height: 17px; }

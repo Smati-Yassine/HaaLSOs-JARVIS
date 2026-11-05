@@ -6,6 +6,7 @@ import { fastPath } from "./fastpath.ts";
 import { findProject } from "./projects.ts";
 import { classify, isApproval } from "./safety.ts";
 import { findApp, googleUrl, websiteUrl } from "./tools.ts";
+import { spokenForm } from "./voice.ts";
 import { decodeReply, knownAction, pickWindow } from "./windows.ts";
 
 const PROJECTS = ["HaaLSO's JARVIS", "Kamayra", "Quizzer", "luminelle", "portfolio", "rachma-mobile", "resido", "tempura"];
@@ -140,4 +141,9 @@ test("extension replies are decoded", () => {
   assert.deepEqual(JSON.parse(decodeReply(String.raw`("[{\"title\": \"it's\"}]",)`)), [{ title: "it's" }]);
   assert.equal(knownAction("minimise"), true);
   assert.equal(knownAction("format"), false);
+});
+
+test("long output isn't read aloud", () => {
+  assert.equal(spokenForm("It's 22:40, sir."), "It's 22:40, sir.");
+  assert.match(spokenForm("x".repeat(300)), /in the chat/);
 });

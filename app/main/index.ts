@@ -1,15 +1,42 @@
-// The desktop app: one window for Jarvis, connected to the brain.
+// The desktop app: one window for Jarvis, connected to the brain and the voice engine.
 import { join } from "node:path";
 
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
 
-import { Jarvis, unloadModel } from "./brain.ts";
+import { Jarvis, unloadModel, type Reply } from "./brain.ts";
+import { Voice, type VoiceEvent } from "./voice.ts";
 
 // Draw natively on Wayland instead of through XWayland.
 app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+// Hides Chromium's harmless warnings about GNOME fonts and video hardware.
+app.commandLine.appendSwitch("log-level", "3");
 
 const jarvis = new Jarvis({ dryRun: process.env.JARVIS_DRY_RUN === "1" });
 let window: BrowserWindow | null = null;
+let voice: Voice | null = null;
+
+function toWindow(event: Record<string, unknown>) {
+  window?.webContents.send("jarvis:event", event);
+}
+
+function speakReply(reply: Reply) {
+  voice?.say(reply.say, Boolean(reply.pending));
+}
+
+async function onVoiceEvent(event: VoiceEvent) {
+  if (event.type === "follow_up") return voice?.listen();
+  if (event.type !== "heard") return toWindow(event);
+  const said = event.text.trim();
+  if (!said) return toWindow({ type: "heard", text: "" });
+  toWindow({ type: "heard", text: said });
+  if (/^(hey )?(jarvis,? )?stop[.!]?$/i.test(said)) {
+    voice?.stop();
+    return toWindow({ type: "stopped" });
+  }
+  const reply = await jarvis.handle(said);
+  toWindow({ type: "reply", reply });
+  speakReply(reply);
+}
 
 function createWindow() {
   window = new BrowserWindow({
@@ -38,25 +65,41 @@ function createWindow() {
   else window.loadFile(join(__dirname, "../renderer/index.html"));
 }
 
-ipcMain.handle("jarvis:ask", (_event, said: unknown) => jarvis.handle(String(said).slice(0, 2000)));
+ipcMain.handle("jarvis:ask", async (_event, said: unknown) => {
+  voice?.stop();
+  const reply = await jarvis.handle(String(said).slice(0, 2000));
+  speakReply(reply);
+  return reply;
+});
 ipcMain.handle("jarvis:warm-up", () => jarvis.warmUp().then(() => true, () => false));
+ipcMain.handle("jarvis:welcome", (_event, text: unknown) => voice?.say(String(text)));
+ipcMain.handle("voice:mute", (_event, muted: unknown) => voice?.setMuted(Boolean(muted)));
+ipcMain.handle("voice:available", () => voice !== null);
 ipcMain.handle("theme:set", (_event, mode: unknown) => {
   nativeTheme.themeSource = mode === "light" ? "light" : "dark";
 });
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
-  // No permissions for the page: voice comes from a separate process, never the browser.
+  // No permissions for the page: the microphone belongs to the voice engine, never the browser.
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  if (process.env.JARVIS_NO_VOICE !== "1") {
+    const args = process.env.JARVIS_VOICE_ARGS ? (JSON.parse(process.env.JARVIS_VOICE_ARGS) as string[]) : [];
+    const engine = new Voice(join(app.getAppPath(), "..", "voice"), onVoiceEvent, args);
+    if (engine.start()) voice = engine;
+  }
   createWindow();
 });
 
-// Free the graphics card when Jarvis closes.
+// Stop the microphone and free the graphics card when Jarvis closes.
 let unloading = false;
 app.on("before-quit", (event) => {
+  voice?.quit();
   if (unloading) return;
   unloading = true;
   event.preventDefault();
   Promise.race([unloadModel(), new Promise((done) => setTimeout(done, 1500))]).finally(() => app.quit());
 });
 app.on("window-all-closed", () => app.quit());
+// Ctrl+C in the terminal should clean up too.
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => app.quit());

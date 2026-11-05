@@ -6,13 +6,26 @@ import { Line, type Mood } from "./Line";
 type Pending = { command: string; level: "run" | "say-back" | "confirm" };
 type Reply = { say: string; source: string; tool?: string; pending?: Pending; ms: number };
 type Message = { id: number; from: "jarvis" | "you"; text: string; pending?: Pending };
+type VoiceEvent = {
+  type: string;
+  text?: string;
+  reply?: Reply;
+  on?: boolean;
+  active?: boolean;
+  message?: string;
+};
+type VoiceStatus = "off" | "loading" | "on" | "muted";
 
 declare global {
   interface Window {
     jarvis: {
       ask(said: string): Promise<Reply>;
       warmUp(): Promise<boolean>;
+      welcome(text: string): Promise<void>;
       setTheme(mode: "dark" | "light"): Promise<void>;
+      setMuted(muted: boolean): Promise<void>;
+      voiceAvailable(): Promise<boolean>;
+      onEvent(listener: (event: VoiceEvent) => void): () => void;
     };
   }
 }
@@ -73,6 +86,8 @@ export function App() {
   const [mode, setMode] = useState(savedMode);
   const [hints, setHints] = useState(true);
   const [pending, setPending] = useState<Pending | null>(null);
+  const [voice, setVoice] = useState<VoiceStatus>("off");
+  const voiceRef = useRef<VoiceStatus>("off");
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const stopSpeaking = useRef(0);
@@ -95,6 +110,8 @@ export function App() {
   const speak = useCallback((text: string, withPending?: Pending) => {
     setMessages((list) => [...list, { id: nextId++, from: "jarvis", text, pending: withPending }]);
     setPending(withPending ?? null);
+    // With a voice, the line follows the real sound. Without one, it estimates.
+    if (voiceRef.current === "on" || voiceRef.current === "muted" || voiceRef.current === "loading") return;
     setMood("speaking");
     window.clearTimeout(stopSpeaking.current);
     stopSpeaking.current = window.setTimeout(
@@ -103,13 +120,64 @@ export function App() {
     );
   }, []);
 
+  const updateVoice = useCallback((status: VoiceStatus) => {
+    voiceRef.current = status;
+    setVoice(status);
+  }, []);
+
+  useEffect(() => {
+    window.jarvis.voiceAvailable().then((available) => updateVoice(available ? "loading" : "off"));
+    return window.jarvis.onEvent((event) => {
+      switch (event.type) {
+        case "ready":
+          updateVoice("on");
+          break;
+        case "mic":
+          if (voiceRef.current !== "loading") updateVoice(event.on ? "on" : "muted");
+          break;
+        case "gone":
+          updateVoice("off");
+          setMood("idle");
+          break;
+        case "wake":
+          setHints(false);
+          setMood("listening");
+          break;
+        case "heard":
+          if (event.text) {
+            setHints(false);
+            setBusy(true);
+            setPending(null);
+            setMood("thinking");
+            setMessages((list) => [...list, { id: nextId++, from: "you", text: event.text! }]);
+          } else {
+            setMood("idle");
+          }
+          break;
+        case "stopped":
+          setBusy(false);
+          setMood("idle");
+          break;
+        case "reply":
+          speak(event.reply!.say, event.reply!.pending);
+          setBusy(false);
+          break;
+        case "speaking":
+          setMood(event.active ? "speaking" : "idle");
+          break;
+      }
+    });
+  }, [speak, updateVoice]);
+
   useEffect(() => {
     let alive = true;
     const started = Date.now();
     window.jarvis.warmUp().then((ready) => {
       if (!alive) return;
       window.setTimeout(() => {
-        speak(ready ? "Welcome back, sir. All systems online." : "Welcome back, sir. Ollama isn't running, so I can only do simple commands.");
+        const welcome = ready ? "Welcome back, sir. All systems online." : "Welcome back, sir. Ollama isn't running, so I can only do simple commands.";
+        speak(welcome);
+        window.jarvis.welcome(welcome);
         setBusy(false);
         input.current?.focus();
       }, Math.max(0, 900 - (Date.now() - started)));
@@ -131,6 +199,7 @@ export function App() {
       try {
         const reply = await window.jarvis.ask(said);
         speak(reply.say, reply.pending);
+        if (voiceRef.current !== "on" && voiceRef.current !== "muted") setMood("idle");
       } catch {
         speak("Something went wrong on my side, sir. Please try again.");
       }
@@ -200,11 +269,30 @@ export function App() {
                   send(value);
                 }}
               >
+                <button
+                  className="mic"
+                  type="button"
+                  disabled={voice === "off" || voice === "loading"}
+                  aria-pressed={voice === "muted"}
+                  aria-label={voice === "muted" ? "Turn microphone on" : "Mute microphone"}
+                  title={voice === "muted" ? "Microphone is off. Click to turn it on." : "Microphone is on. Click to mute."}
+                  onClick={() => {
+                    const mute = voice !== "muted";
+                    updateVoice(mute ? "muted" : "on");
+                    window.jarvis.setMuted(mute);
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
+                    <rect x="9" y="3" width="6" height="11" rx="3" />
+                    <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+                    {voice === "muted" && <path d="M4 4l16 16" />}
+                  </svg>
+                </button>
                 <input
                   ref={input}
                   value={draft}
                   autoComplete="off"
-                  placeholder="Type to Jarvis"
+                  placeholder={voice === "on" ? 'Say "Hey Jarvis" or type' : voice === "loading" ? "Voice is loading. You can type" : voice === "muted" ? "Microphone off. Type to Jarvis" : "Type to Jarvis"}
                   aria-label="Message to Jarvis"
                   onChange={(event) => {
                     setDraft(event.target.value);

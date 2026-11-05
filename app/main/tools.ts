@@ -87,8 +87,11 @@ async function windowControl(args: Args, ctx: Context): Promise<Result> {
     const window = pickWindow(name, await listWindows());
     if (!window) return { ok: false, say: `I can't see a ${name} window, sir.` };
     if (!ctx.dryRun) await controlWindow(window, action);
-    const done: Record<string, string> = { focus: "Bringing up", restore: "Restoring", close: "Closing" };
-    const verb = done[action] ?? (action.startsWith("mini") ? "Minimizing" : "Maximizing");
+    const done: Record<string, string> = {
+      focus: "Bringing up", restore: "Restoring", close: "Closing", unmaximize: "Restoring",
+      minimize: "Minimizing", minimise: "Minimizing", maximize: "Maximizing", maximise: "Maximizing",
+    };
+    const verb = done[action];
     return { ok: true, say: `${verb} ${name}, sir.` };
   } catch (error) {
     if (String(error).includes(NOT_INSTALLED)) return { ok: false, say: "The window control extension isn't installed yet, sir." };
