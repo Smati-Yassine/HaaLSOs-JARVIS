@@ -13,7 +13,7 @@ const LOG_DIR = join(homedir(), ".Jarvis", "logs");
 const KEEP_TURNS = 6;
 
 const SYSTEM = `You are Jarvis, the user's personal assistant on his Linux computer. Address him as sir. \
-Keep spoken replies to one or two short sentences. Use a tool whenever the request is an action on the \
+Keep spoken replies to one or two short sentences, with no emoji. Use a tool whenever the request is an action on the \
 computer or needs live information. Answer directly, without tools, for jokes, general knowledge, thanks \
 and conversation. Never search for facts you already know. Only use google_search when he explicitly says \
 google or search. Any request to add, fix, change or build something in code goes to ask_claude. A website \
@@ -75,6 +75,11 @@ export async function unloadModel() {
     method: "POST",
     body: JSON.stringify({ model: MODEL, keep_alive: 0 }),
   }).catch(() => {});
+}
+
+// Replies get read aloud, so symbols a voice can't say are removed.
+export function speakable(text: string): string {
+  return text.replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, "").replace(/\s+$/gm, "").trim();
 }
 
 export class Jarvis {
@@ -145,7 +150,7 @@ export class Jarvis {
     try {
       const { call, content } = await askModel([...this.history, { role: "user", content: said }]);
       if (call) return this.runTool(call, "model", said, begin);
-      return this.finish(said, content || "I didn't catch that, sir.", "model", begin);
+      return this.finish(said, speakable(content) || "I didn't catch that, sir.", "model", begin);
     } catch (error) {
       log({ said, error: String(error) });
       const offline = String(error).includes("fetch failed");

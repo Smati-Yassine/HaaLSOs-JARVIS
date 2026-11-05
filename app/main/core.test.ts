@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseTextCall } from "./brain.ts";
+import { parseTextCall, speakable } from "./brain.ts";
 import { fastPath } from "./fastpath.ts";
 import { findProject } from "./projects.ts";
 import { classify, isApproval } from "./safety.ts";
@@ -111,4 +111,9 @@ test("apps are found by spoken name", () => {
   assert.equal(findApp("VS Code", apps)?.bin, "code");
   assert.equal(findApp("browser", apps)?.bin, "brave");
   assert.equal(findApp("spotify", apps), null);
+});
+
+test("replies contain only what a voice can say", () => {
+  assert.equal(speakable("Because they make up everything! \u{1F604}"), "Because they make up everything!");
+  assert.equal(speakable("It's 22:40, sir."), "It's 22:40, sir.");
 });
