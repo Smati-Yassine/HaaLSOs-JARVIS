@@ -70,7 +70,7 @@ export function fastPath(said: string): Call | null {
     return { tool: "close_app", args: { name: match[1] } };
   }
   if ((match = lower.match(/^(minimi[sz]e|maximi[sz]e|focus)\s+(?:the\s+)?(.+)$/))) {
-    return { tool: "window_control", args: { action: match[1].replace("s", "z"), name: match[2] } };
+    return { tool: "window_control", args: { action: match[1], name: match[2] } };
   }
   if (/\bbattery\b/.test(lower) && /^(how|what|check|battery)/.test(lower)) {
     return { tool: "system_info", args: { what: "battery" } };

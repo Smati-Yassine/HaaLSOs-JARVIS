@@ -6,6 +6,7 @@ import { fastPath } from "./fastpath.ts";
 import { findProject } from "./projects.ts";
 import { classify, isApproval } from "./safety.ts";
 import { findApp, googleUrl, websiteUrl } from "./tools.ts";
+import { decodeReply, knownAction, pickWindow } from "./windows.ts";
 
 const PROJECTS = ["HaaLSO's JARVIS", "Kamayra", "Quizzer", "luminelle", "portfolio", "rachma-mobile", "resido", "tempura"];
 
@@ -69,6 +70,7 @@ test("fast path handles plain commands", () => {
     ["close the project", "close_project", {}],
     ["we're done coding", "close_project", {}],
     ["Minimize Firefox.", "window_control", { action: "minimize", name: "firefox" }],
+    ["maximise the terminal", "window_control", { action: "maximise", name: "terminal" }],
     ["how much battery do I have", "system_info", { what: "battery" }],
   ];
   for (const [said, tool, args] of cases) assert.deepEqual(fastPath(said), { tool, args }, said);
@@ -116,4 +118,26 @@ test("apps are found by spoken name", () => {
 test("replies contain only what a voice can say", () => {
   assert.equal(speakable("Because they make up everything! \u{1F604}"), "Because they make up everything!");
   assert.equal(speakable("It's 22:40, sir."), "It's 22:40, sir.");
+});
+
+test("windows are found by spoken name", () => {
+  const windows = [
+    { id: 1, title: "HaaLSO's JARVIS - Visual Studio Code", wm_class: "Code" },
+    { id: 2, title: "weather - Brave", wm_class: "brave-browser" },
+    { id: 3, title: "haalso@laptop: ~", wm_class: "org.gnome.Ptyxis" },
+    { id: 4, title: "Mozilla Firefox", wm_class: "firefox_firefox", wm_class_instance: "firefox" },
+  ];
+  assert.equal(pickWindow("firefox", windows)?.id, 4);
+  assert.equal(pickWindow("code", windows)?.id, 1);
+  assert.equal(pickWindow("VS Code", windows)?.id, 1);
+  assert.equal(pickWindow("the terminal".replace("the ", ""), windows)?.id, 3);
+  assert.equal(pickWindow("brave window", windows)?.id, 2);
+  assert.equal(pickWindow("spotify", windows), null);
+});
+
+test("extension replies are decoded", () => {
+  assert.deepEqual(JSON.parse(decodeReply(`('[{"id": 1, "title": "x"}]',)`)), [{ id: 1, title: "x" }]);
+  assert.deepEqual(JSON.parse(decodeReply(String.raw`("[{\"title\": \"it's\"}]",)`)), [{ title: "it's" }]);
+  assert.equal(knownAction("minimise"), true);
+  assert.equal(knownAction("format"), false);
 });

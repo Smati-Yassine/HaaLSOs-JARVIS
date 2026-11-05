@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { findProject, listProjects, PROJECTS_ROOT } from "./projects.ts";
 import { classify, type Level } from "./safety.ts";
+import { controlWindow, knownAction, listWindows, NOT_INSTALLED, pickWindow } from "./windows.ts";
 
 const run = promisify(execFile);
 const BRAVE = "/snap/bin/brave";
@@ -78,6 +79,23 @@ export function findApp(spoken: string, apps: App[] = desktopEntries()): App | n
   );
 }
 
+async function windowControl(args: Args, ctx: Context): Promise<Result> {
+  const action = text(args.action).toLowerCase();
+  const name = text(args.name);
+  if (!knownAction(action)) return { ok: false, say: "I can minimize, maximize, focus or restore a window, sir." };
+  try {
+    const window = pickWindow(name, await listWindows());
+    if (!window) return { ok: false, say: `I can't see a ${name} window, sir.` };
+    if (!ctx.dryRun) await controlWindow(window, action);
+    const done: Record<string, string> = { focus: "Bringing up", restore: "Restoring", close: "Closing" };
+    const verb = done[action] ?? (action.startsWith("mini") ? "Minimizing" : "Maximizing");
+    return { ok: true, say: `${verb} ${name}, sir.` };
+  } catch (error) {
+    if (String(error).includes(NOT_INSTALLED)) return { ok: false, say: "The window control extension isn't installed yet, sir." };
+    throw error;
+  }
+}
+
 async function openApp(args: Args, ctx: Context): Promise<Result> {
   const name = text(args.name);
   const app = findApp(name);
@@ -90,6 +108,13 @@ async function closeApp(args: Args, ctx: Context): Promise<Result> {
   const name = text(args.name);
   if (!name) return { ok: false, say: "Which program, sir?" };
   const app = findApp(name);
+  // Closing the window lets the program ask about unsaved work, so try that first.
+  const open = await listWindows().catch(() => []);
+  const window = pickWindow(app?.bin || name, open) ?? pickWindow(name, open);
+  if (window) {
+    if (!ctx.dryRun) await controlWindow(window, "close");
+    return { ok: true, say: `Closing ${app?.name ?? name}, sir.` };
+  }
   const target = app?.bin || name.toLowerCase();
   // Exact process name only, and never another user's process.
   const uid = String(process.getuid?.() ?? "");
@@ -262,7 +287,7 @@ export const TOOLS: Record<string, Tool> = {
   window_control: {
     description: "Minimize, maximize or focus a program's window.",
     params: { action: "minimize, maximize or focus", name: "Program name" },
-    run: () => later("Window control"),
+    run: windowControl,
   },
   google_search: {
     description: "Search Google in a new Brave browser tab.",
