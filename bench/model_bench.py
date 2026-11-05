@@ -7,7 +7,6 @@ which tool each model picks and how long it takes.
 """
 import argparse
 import json
-import re
 import statistics
 import time
 import urllib.error
@@ -17,8 +16,7 @@ OLLAMA = "http://localhost:11434"
 
 SYSTEM = (
     "You are Jarvis, the user's personal assistant on his Linux computer. Address him as sir. "
-    "Keep spoken replies to one or two short sentences. Always reply in the language the user "
-    "just spoke, English or French. Use a tool whenever the request "
+    "Keep spoken replies to one or two short sentences. Use a tool whenever the request "
     "is an action on the computer or needs live information. Answer directly, without tools, "
     "for jokes, general knowledge, thanks and conversation. Only use google_search when he "
     "explicitly says google or search. Any request to add, fix, change or build something in code "
@@ -99,25 +97,8 @@ CASES = [
     ("how are you today", None, {}),
     ("what is the capital of Japan", None, {}),
     ("thanks Jarvis", None, {}),
-    # French: the user speaks either language and Jarvis answers in the same one.
-    ("Quelle heure est-il ?", "get_time", {}),
-    ("Ouvre Firefox", "open_app", {"name": "firefox"}),
-    ("ferme discord", "close_app", {"name": "discord"}),
-    ("cherche sur google la météo à Tunis", "google_search", {"query": "tunis"}),
-    ("mets le volume à 30", "set_volume", {"level": "30"}),
-    ("mets la musique en pause", "media_control", {"action": "pause"}),
-    ("commençons à coder mon projet Luminelle", "start_coding", {"project": "luminelle"}),
-    ("ajoute le mode sombre à la page des réglages", "ask_claude", {"task": "sombre"}),
-    ("ferme le projet", "close_project", {}),
-    ("Raconte-moi une blague", None, {"_french": "yes"}),
-    ("Qui a écrit Les Misérables ?", None, {}),
-    ("merci Jarvis", None, {"_french": "yes"}),
 ]
 
-# Common French words, to check that a reply to French came back in French.
-FRENCH_WORDS = re.compile(
-    r"\b(le|la|les|un|une|des|de|du|est|et|je|vous|pour|que|qui|avec|monsieur|bien|merci|plaisir)\b", re.I
-)
 
 
 def post(path, body, timeout=180):
@@ -156,10 +137,7 @@ def judge(reply, expected, args):
     calls = message.get("tool_calls") or []
     if not calls:
         content = (message.get("content") or "").strip()
-        passed = expected is None and bool(content)
-        if "_french" in args and len(FRENCH_WORDS.findall(content)) < 2:
-            passed = False
-        return passed, "said: " + content[:110]
+        return expected is None and bool(content), "said: " + content[:110]
     call = calls[0]["function"]
     got_args = call.get("arguments") or {}
     did = call["name"] + " " + json.dumps(got_args)

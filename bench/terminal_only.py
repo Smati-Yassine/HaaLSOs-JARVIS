@@ -38,16 +38,13 @@ PATTERNS = [
     r"\b(pkill|killall|kill|tmux)\b.*claude", r"\b(pkill|killall|kill|tmux)\b.*claude",
     r"\brm\b.*notes\.txt", r"\b(apt|apt-get|snap)\b.*docker",
     None, None, None, None, None,
-    r"\bdate\b", r"\bfirefox\b", CLOSE + "discord", GOOGLE + "tunis", VOLUME + "30", MEDIA + "pause",
-    CLAUDE + "|luminelle", CLAUDE + "sombre", r"\b(pkill|killall|kill|tmux)\b.*claude",
-    None, None, None,
 ]
 assert len(PATTERNS) == len(bench.CASES)
 
 TERMINAL = [t for t in bench.TOOLS if t["function"]["name"] == "run_command"]
 SYSTEM = (
     "You are Jarvis, the user's personal assistant on his computer: Ubuntu Linux, GNOME on Wayland. "
-    "Address him as sir and keep spoken replies short, in the language he just spoke (English or French). You act on the computer only by running shell "
+    "Address him as sir and keep spoken replies short. You act on the computer only by running shell "
     "commands with run_command. His projects are in ~/Documents/Projects and he browses with Brave. "
     "Answer directly, without a command, for jokes, general knowledge and conversation."
 )

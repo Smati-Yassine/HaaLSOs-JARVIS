@@ -1,0 +1,11 @@
+{
+  "name": "jarvis-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test main/core.test.ts",
+    "jarvis": "node main/cli.ts"
+  }
+}

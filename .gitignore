@@ -4,3 +4,13 @@ __pycache__/
 .env.*
 results.json
 terminal_results.json
+node_modules/
+dist/
+out/
+*.wav
+*.onnx
+*.onnx.json
+*.bin
+*.pth
+*.ckpt
+.Jarvis/
