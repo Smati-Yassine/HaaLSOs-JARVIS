@@ -4,7 +4,7 @@ import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const PROJECTS_ROOT = join(homedir(), "Documents", "Projects");
+export const PROJECTS_ROOT = process.env.JARVIS_PROJECTS_ROOT || join(homedir(), "Documents", "Projects");
 
 const squash = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
 

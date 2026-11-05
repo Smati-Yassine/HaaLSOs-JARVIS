@@ -17,8 +17,12 @@ export default defineConfig({
     },
   },
   renderer: {
-    root: resolve(__dirname, "jarvis-window"),
-    build: { rollupOptions: { input: { index: resolve(__dirname, "jarvis-window/index.html") } } },
+    root: __dirname,
+    build: {
+      rollupOptions: {
+        input: { jarvis: resolve(__dirname, "jarvis-window/index.html") },
+      },
+    },
     plugins: [react()],
   },
 });

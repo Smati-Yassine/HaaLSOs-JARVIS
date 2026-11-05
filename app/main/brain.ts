@@ -82,6 +82,30 @@ export function speakable(text: string): string {
   return text.replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, "").replace(/\s+$/gm, "").trim();
 }
 
+// Turns Claude's final message into one spoken sentence.
+export async function summarize(message: string): Promise<string> {
+  const fallback = message.split(/(?<=[.!?])\s/)[0]?.slice(0, 160) ?? "";
+  if (message.length < 120) return speakable(message);
+  try {
+    const response = await fetch(OLLAMA, {
+      method: "POST",
+      signal: AbortSignal.timeout(12000),
+      body: JSON.stringify({
+        model: MODEL, stream: false, think: false, keep_alive: -1,
+        options: { temperature: 0, num_ctx: 4096, num_predict: 60 },
+        messages: [{
+          role: "user",
+          content: `Summarize what the coding assistant Claude reported, in one short plain sentence to be read aloud. Write in the third person, starting with "It", never "I". No code, no file paths, no emoji.\n\n${message.slice(0, 3000)}`,
+        }],
+      }),
+    });
+    const { message: reply } = (await response.json()) as { message: { content?: string } };
+    return speakable(reply.content ?? "") || speakable(fallback);
+  } catch {
+    return speakable(fallback);
+  }
+}
+
 export class Jarvis {
   private history: Message[] = [];
   private pending: Pending | null = null;
@@ -89,6 +113,10 @@ export class Jarvis {
 
   constructor(ctx: Context = { dryRun: false }) {
     this.ctx = ctx;
+  }
+
+  connectClaude(claude: NonNullable<Context["claude"]>) {
+    this.ctx = { ...this.ctx, claude };
   }
 
   async warmUp() {
@@ -101,6 +129,11 @@ export class Jarvis {
   }
 
   private async runTool(call: Call, source: Reply["source"], said: string, begin: number): Promise<Reply> {
+    // While a project is open, work goes to Claude, which knows the project and asks permission,
+    // rather than to a shell command guessed by the small model.
+    if (call.tool === "run_command" && this.ctx.claude?.openProject) call = { tool: "ask_claude", args: {} };
+    // Claude gets the user's exact words, never the small model's rewrite of them.
+    if (call.tool === "ask_claude") call = { ...call, args: { task: said } };
     const tool = TOOLS[call.tool];
     if (!tool) return this.finish(said, "I'm not able to do that, sir.", source, begin);
     log({ said, tool: call.tool, args: call.args, source, dryRun: this.ctx.dryRun });

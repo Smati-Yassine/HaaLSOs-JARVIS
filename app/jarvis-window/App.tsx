@@ -1,6 +1,7 @@
 import gsap from "gsap";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { ClaudePanel, type Snapshot } from "./ClaudePanel";
 import { Line, type Mood } from "./Line";
 
 type Pending = { command: string; level: "run" | "say-back" | "confirm" };
@@ -25,6 +26,9 @@ declare global {
       setTheme(mode: "dark" | "light"): Promise<void>;
       setMuted(muted: boolean): Promise<void>;
       voiceAvailable(): Promise<boolean>;
+      minimize(): void;
+      toggleMaximize(): void;
+      close(): void;
       onEvent(listener: (event: VoiceEvent) => void): () => void;
     };
   }
@@ -76,6 +80,46 @@ function Spoken({ text, onDone }: { text: string; onDone?: () => void }) {
   return <p aria-label={text}>{shown}</p>;
 }
 
+// Claude's minimized form: click to bring the window back, drag to move it anywhere.
+function Bubble({ working, project, onOpen }: { working: boolean; project: string; onOpen(): void }) {
+  const element = useRef<HTMLButtonElement>(null);
+  const drag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
+  return (
+    <button
+      ref={element}
+      type="button"
+      className="bubble"
+      data-working={working}
+      aria-label={`Open Claude: ${project}`}
+      title={`Open Claude: ${project}`}
+      onPointerDown={(event) => {
+        const box = event.currentTarget.getBoundingClientRect();
+        drag.current = { dx: event.clientX - box.left, dy: event.clientY - box.top, moved: false };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        if (!drag.current || !element.current) return;
+        const parent = element.current.offsetParent!.getBoundingClientRect();
+        const x = event.clientX - parent.left - drag.current.dx;
+        const y = event.clientY - parent.top - drag.current.dy;
+        drag.current.moved = true;
+        element.current.style.left = `${Math.max(4, Math.min(parent.width - 72, x))}px`;
+        element.current.style.top = `${Math.max(4, Math.min(parent.height - 72, y))}px`;
+        element.current.style.bottom = "auto";
+      }}
+      onPointerUp={() => {
+        const wasDragged = drag.current?.moved;
+        drag.current = null;
+        if (!wasDragged) onOpen();
+      }}
+    >
+      <svg viewBox="0 5 24 15" fill="#d97757" aria-hidden="true">
+        <path fillRule="evenodd" clipRule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z" />
+      </svg>
+    </button>
+  );
+}
+
 export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
@@ -88,6 +132,8 @@ export function App() {
   const [pending, setPending] = useState<Pending | null>(null);
   const [voice, setVoice] = useState<VoiceStatus>("off");
   const voiceRef = useRef<VoiceStatus>("off");
+  const [claude, setClaude] = useState<Snapshot | null>(null);
+  const [panelHidden, setPanelHidden] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const stopSpeaking = useRef(0);
@@ -165,9 +211,21 @@ export function App() {
         case "speaking":
           setMood(event.active ? "speaking" : "idle");
           break;
+        case "show-claude":
+          setPanelHidden(false);
+          break;
       }
     });
   }, [speak, updateVoice]);
+
+  useEffect(() => {
+    window.claude.snapshot().then(setClaude);
+    return window.claude.onChange(setClaude);
+  }, []);
+
+  // A newly opened project always shows its panel.
+  const openProject = claude?.project ?? null;
+  useEffect(() => setPanelHidden(false), [openProject]);
 
   useEffect(() => {
     let alive = true;
@@ -209,10 +267,28 @@ export function App() {
     [busy, speak],
   );
 
+  const panelOpen = Boolean(openProject) && !panelHidden;
   return (
+    <div className="shell">
+    <header className="appbar">
+      <b>Jarvis</b>
+      <button type="button" aria-label="Minimize" title="Minimize" onClick={() => window.jarvis.minimize()}>
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor" strokeWidth="1.3" /></svg>
+      </button>
+      <button type="button" aria-label="Maximize" title="Maximize" onClick={() => window.jarvis.toggleMaximize()}>
+        <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.3" /></svg>
+      </button>
+      <button type="button" className="quit" aria-label="Close" title="Close" onClick={() => window.jarvis.close()}>
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" /></svg>
+      </button>
+    </header>
+    <div className="main" data-claude={panelOpen ? "open" : "closed"}>
     <div className="desk">
       <div className="stage">
         <Line mood={mood} pulse={pulse} />
+        {openProject && panelHidden && (
+          <Bubble working={Boolean(claude?.sessions.some((session) => session.working))} project={openProject} onOpen={() => setPanelHidden(false)} />
+        )}
       </div>
       <section className="talk" aria-label="Conversation with Jarvis">
         <div className="tabs" role="tablist">
@@ -319,6 +395,13 @@ export function App() {
             </div>
         </div>
       </section>
+    </div>
+    {openProject && claude && (
+      <div className="panel-slot" hidden={panelHidden}>
+        <ClaudePanel snap={claude} mode={mode} onMinimize={() => setPanelHidden(true)} />
+      </div>
+    )}
+    </div>
     </div>
   );
 }

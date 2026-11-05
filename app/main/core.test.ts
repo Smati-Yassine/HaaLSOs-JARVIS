@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseTextCall, speakable } from "./brain.ts";
+import { Jarvis, parseTextCall, speakable } from "./brain.ts";
 import { fastPath } from "./fastpath.ts";
 import { findProject } from "./projects.ts";
 import { classify, isApproval } from "./safety.ts";
@@ -146,4 +146,16 @@ test("extension replies are decoded", () => {
 test("long output isn't read aloud", () => {
   assert.equal(spokenForm("It's 22:40, sir."), "It's 22:40, sir.");
   assert.match(spokenForm("x".repeat(300)), /in the chat/);
+});
+
+test("while a project is open, coding goes to Claude with the exact words", async () => {
+  const asked: string[] = [];
+  const claude = { openProject: "luminelle", start() {}, close() {}, ask: (task: string) => (asked.push(task), true) };
+  const jarvis = new Jarvis({ dryRun: false, claude });
+  // Reaches the same code the model's choice would, without needing Ollama.
+  const run = (jarvis as unknown as { runTool: Function }).runTool.bind(jarvis);
+  const reply = await run({ tool: "run_command", args: { command: "rm -rf ~/x" } }, "model", "clean up the build folder", Date.now());
+  assert.deepEqual(asked, ["clean up the build folder"]);
+  assert.equal(reply.pending, undefined);
+  assert.match(reply.say, /Passing that to Claude/);
 });

@@ -20,7 +20,13 @@ export type Result = {
   // Set when a command must wait for the user before running.
   needsApproval?: { command: string; level: Level };
 };
-export type Context = { dryRun: boolean };
+export type ClaudeControl = {
+  openProject: string | null;
+  start(project: string, path: string): void;
+  ask(task: string): boolean;
+  close(): void;
+};
+export type Context = { dryRun: boolean; claude?: ClaudeControl };
 
 const text = (value: unknown) => String(value ?? "").trim();
 
@@ -194,7 +200,7 @@ async function mediaControl(args: Args, ctx: Context): Promise<Result> {
   const players = listed.stdout.match(/org\.mpris\.MediaPlayer2\.[\w.-]+/g) ?? [];
   if (!players.length) return { ok: false, say: "Nothing is playing, sir." };
   await run("gdbus", [
-    "call", "--session", "--dest", players[0], "--object-path", "/org/mpris/MediaPlayer2",
+    "call", "--session", "--dest", players[0]!, "--object-path", "/org/mpris/MediaPlayer2",
     "--method", `org.mpris.MediaPlayer2.Player.${method}`,
   ]);
   return { ok: true, say: "Done, sir." };
@@ -320,21 +326,36 @@ export const TOOLS: Record<string, Tool> = {
   start_coding: {
     description: "Open a coding project in the Claude window.",
     params: { project: "Project name" },
-    run: (args) => {
+    run: (args, ctx) => {
       const spoken = text(args.project);
       const name = findProject(spoken, listProjects());
       if (!name) return { ok: false, say: `I can't find a project called ${spoken}, sir.` };
-      return { ok: true, say: `I found ${name} in ${join(PROJECTS_ROOT, name)}, sir. The Claude window isn't connected yet.` };
+      if (!ctx.claude) return { ok: true, say: `I found ${name}, sir, but the Claude window only works in the app.` };
+      const open = ctx.claude.openProject;
+      if (open === name) return { ok: true, say: `${name} is already open, sir.` };
+      if (open) return { ok: false, say: `${open} is still open, sir. Tell me to close the project first.` };
+      if (!ctx.dryRun) ctx.claude.start(name, join(PROJECTS_ROOT, name));
+      return { ok: true, say: `Opening Claude in ${name}, sir.` };
     },
   },
   ask_claude: {
     description: "Send a coding task to the open Claude session: adding features, fixing bugs, changing code or pages.",
     params: { task: "The user's exact request" },
-    run: () => later("Claude"),
+    run: (args, ctx) => {
+      if (!ctx.claude) return later("Claude");
+      if (!ctx.claude.openProject) return { ok: false, say: "No project is open, sir. Tell me which one to start." };
+      if (!ctx.claude.ask(text(args.task))) return { ok: false, say: "There's no Claude session open, sir." };
+      return { ok: true, say: "Passing that to Claude, sir." };
+    },
   },
   close_project: {
     description: "Close the open coding project and everything in it, when he says he is done coding.",
-    run: () => later("The Claude window"),
+    run: (_args, ctx) => {
+      if (!ctx.claude?.openProject) return { ok: true, say: "Nothing is open, sir." };
+      const name = ctx.claude.openProject;
+      if (!ctx.dryRun) ctx.claude.close();
+      return { ok: true, say: `${name} is closed, sir. All its sessions and terminals are shut down.` };
+    },
   },
   run_command: {
     description: "Run a shell command for anything no other tool covers, like managing files or installing software.",
