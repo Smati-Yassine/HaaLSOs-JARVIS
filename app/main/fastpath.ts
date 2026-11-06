@@ -16,6 +16,7 @@ export function clean(said: string): string {
     .trim()
     .replace(/[.!?,]+$/g, "")
     .replace(/^(hey |ok |okay )?jarvis[,:]?\s*/i, "")
+    .replace(/^yes,? sir[.,!?]*\s+(?=\S)/i, "") // Jarvis's own words, if the mic caught them.
     .replace(/^(please|can you|could you)\s+/i, "")
     .replace(/\s+please$/i, "")
     .trim();
@@ -37,6 +38,16 @@ export function fastPath(said: string): Call | null {
     return { tool: "get_time", args: { want: "date" } };
   }
 
+  if (/\b(list|show|what are|which are|name)\b.*\bprojects\b/.test(lower)) return { tool: "list_projects", args: {} };
+
+  // Saying "google" always means Brave, even for the weather.
+  const wantsSearch = /^(google|search|look up)\b/.test(lower);
+  if (!wantsSearch && /\b(weather|forecast|temperature)\b/.test(lower) && !/\b(code|project|app|page|api|component|add|fix|build)\b/.test(lower)) {
+    const place = text.match(/\b(?:in|for|at)\s+([\p{L}][\p{L} '-]*?)(?:\s+(?:today|tomorrow|right now|now))?$/iu)?.[1];
+    const args: Record<string, string> = /\btomorrow\b/.test(lower) ? { when: "tomorrow" } : {};
+    if (place && !/^(the|my|this)\b/i.test(place)) args.location = place;
+    return { tool: "get_weather", args };
+  }
   if (/^mute( the (sound|volume|audio))?$/.test(lower)) return { tool: "set_volume", args: { level: "mute" } };
   if (/^unmute( the (sound|volume|audio))?$/.test(lower)) return { tool: "set_volume", args: { level: "unmute" } };
   if ((match = lower.match(/^(?:set |turn )?(?:the )?volume(?: up| down)?(?: to| at)? (.+?)(?: percent|%)?$/))) {

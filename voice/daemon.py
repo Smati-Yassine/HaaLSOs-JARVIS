@@ -32,6 +32,7 @@ END_SILENCE = 0.7  # Seconds of quiet that end a command.
 NUDGE_AFTER = 1.2  # Quiet this long after the wake word: Jarvis says "Yes, sir?"
 GIVE_UP_AFTER = 6.0
 MAX_COMMAND = 15.0
+ECHO_SETTLE = 0.25  # Seconds to ignore after Jarvis stops, while his voice fades from the mic.
 PRE_ROLL = 0.8  # Voice detection reacts late, so keep what came just before it.
 
 COMMON = ["Yes, sir?", "Right away, sir.", "Done, sir.", "Cancelled, sir."]
@@ -277,10 +278,20 @@ class Daemon:
         last_voice = None
         elapsed_frames = 0
         nudged = not heard_wake
+        settle = 0
         while not self.quit.is_set():
             frame = mic.read()
             if frame is None:
                 break
+            # Jarvis's own "Yes, sir?" must not become part of the command. The microphone can
+            # hear it even through a headset, so nothing counts until he has stopped talking.
+            if self.mouth.busy.is_set():
+                frames, began, last_voice, elapsed_frames = [], None, None, 0
+                settle = int(ECHO_SETTLE * RATE / FRAME)
+                continue
+            if settle > 0:
+                settle -= 1
+                continue
             elapsed_frames += 1
             now = elapsed_frames * FRAME / RATE
             if self.ears.is_speech(frame):

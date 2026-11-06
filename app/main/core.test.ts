@@ -4,14 +4,17 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
-import { Jarvis, parseTextCall, pruneLog, scrubLog, speakable } from "./brain.ts";
+import { Jarvis, parseTextCall, pruneLog, scrubLog, speakable, toolFitsWords } from "./brain.ts";
 import { fastPath } from "./fastpath.ts";
 import { containsSecret, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { findProject } from "./projects.ts";
 import { classify, isApproval } from "./safety.ts";
-import { findApp, googleUrl, websiteUrl } from "./tools.ts";
+import { findApp, googleUrl, homeCity, weatherSentence, websiteUrl } from "./tools.ts";
 import { spokenForm } from "./voice.ts";
 import { decodeReply, knownAction, pickWindow } from "./windows.ts";
+
+// Tests must never write into the real command log.
+process.env.JARVIS_LOG_DIR = mkdtempSync(joinPath(tmpdir(), "jarvis-test-log-"));
 
 const PROJECTS = ["HaaLSO's JARVIS", "Kamayra", "Quizzer", "luminelle", "portfolio", "rachma-mobile", "resido", "tempura"];
 
@@ -215,7 +218,7 @@ test("search text can't break out of the query", () => {
 
 test("a stray yes does nothing", async () => {
   const jarvis = new Jarvis({ dryRun: true });
-  for (const said of ["yes", "Yes.", "ok", "Jarvis, do it"]) {
+  for (const said of ["yes", "Yes.", "ok", "Jarvis, do it", "Yes, sir.", "Yes sir"]) {
     const reply = await jarvis.handle(said);
     assert.equal(reply.tool, undefined, said);
     assert.match(reply.say, /nothing waiting/, said);
@@ -266,4 +269,45 @@ test("the command log forgets too, and deletes old entries", () => {
   assert.match(left, /ask my dentist/);
   assert.equal(statSync(path).mode & 0o777, 0o600);
   rmSync(dir, { recursive: true });
+});
+
+test("Jarvis's own words don't change the request", () => {
+  assert.deepEqual(fastPath("Yes, sir How's the weather?"), { tool: "get_weather", args: {} });
+  assert.deepEqual(fastPath("Yes, sir. What time is it?"), { tool: "get_time", args: {} });
+});
+
+test("weather requests are understood", () => {
+  assert.deepEqual(fastPath("How's the weather?"), { tool: "get_weather", args: {} });
+  assert.deepEqual(fastPath("what's the weather in Paris"), { tool: "get_weather", args: { location: "Paris" } });
+  assert.deepEqual(fastPath("what's the weather tomorrow"), { tool: "get_weather", args: { when: "tomorrow" } });
+  assert.deepEqual(fastPath("weather in New York tomorrow"), { tool: "get_weather", args: { when: "tomorrow", location: "New York" } });
+  assert.equal(fastPath("google the weather in Tunis")?.tool, "google_search");
+  assert.equal(fastPath("add a weather page to the app"), null);
+});
+
+test("weather is reported in plain words", () => {
+  const data = {
+    current: { temperature_2m: 21.4, weather_code: 2 },
+    daily: { temperature_2m_max: [24.2, 18.6], temperature_2m_min: [14, 11.2], weather_code: [2, 61], precipitation_probability_max: [10, 70] },
+  };
+  assert.equal(weatherSentence("Tunis", data, false), "It's 21 degrees and partly cloudy in Tunis, sir, with a high of 24.");
+  assert.equal(weatherSentence("Tunis", data, true), "Tomorrow in Tunis looks rainy, 11 to 19 degrees, with a 70 percent chance of rain, sir.");
+  assert.equal(homeCity("Africa/Tunis"), "Tunis");
+  assert.equal(homeCity("America/New_York"), "New York");
+});
+
+test("the model can't search or tell the time without those words", () => {
+  assert.equal(toolFitsWords("google_search", "list my projects"), false);
+  assert.equal(toolFitsWords("google_search", "Yes, sir."), false);
+  assert.equal(toolFitsWords("google_search", "look up flights to Paris"), true);
+  assert.equal(toolFitsWords("get_time", "how's the weather"), false);
+  assert.equal(toolFitsWords("get_time", "could you tell me what time it is"), true);
+  assert.equal(toolFitsWords("open_app", "fire up firefox"), true);
+});
+
+test("projects can be listed", () => {
+  for (const said of ["list my projects", "show me my projects", "what are my projects", "Yes sir. List my projects."]) {
+    assert.deepEqual(fastPath(said), { tool: "list_projects", args: {} }, said);
+  }
+  assert.equal(fastPath("let's start coding my Luminelle project"), null);
 });

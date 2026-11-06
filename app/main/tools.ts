@@ -169,6 +169,50 @@ async function openWebsite(args: Args, ctx: Context): Promise<Result> {
   return { ok: true, say: `Opening ${new URL(url).hostname.replace(/^www\./, "")}, sir.` };
 }
 
+// ---- Weather ----------------------------------------------------------------
+
+const SKY: [number, string][] = [
+  [0, "clear"], [1, "mostly clear"], [2, "partly cloudy"], [3, "overcast"], [48, "foggy"], [57, "drizzling"],
+  [67, "rainy"], [77, "snowy"], [82, "showery"], [86, "snow showers"], [99, "stormy"],
+];
+const sky = (code: number) => SKY.find(([limit]) => code <= limit)?.[1] ?? "unsettled";
+
+// Without a named place, the computer's timezone says where home is, with no location lookup.
+export function homeCity(zone = Intl.DateTimeFormat().resolvedOptions().timeZone): string {
+  return zone.split("/").pop()?.replace(/_/g, " ") ?? "";
+}
+
+type Forecast = {
+  current: { temperature_2m: number; weather_code: number };
+  daily: { temperature_2m_max: number[]; temperature_2m_min: number[]; weather_code: number[]; precipitation_probability_max: number[] };
+};
+
+export function weatherSentence(place: string, data: Forecast, tomorrow: boolean): string {
+  const day = tomorrow ? 1 : 0;
+  const high = Math.round(data.daily.temperature_2m_max[day]);
+  const low = Math.round(data.daily.temperature_2m_min[day]);
+  const rain = data.daily.precipitation_probability_max[day];
+  const chance = rain >= 30 ? `, with a ${rain} percent chance of rain` : "";
+  if (tomorrow) return `Tomorrow in ${place} looks ${sky(data.daily.weather_code[1])}, ${low} to ${high} degrees${chance}, sir.`;
+  return `It's ${Math.round(data.current.temperature_2m)} degrees and ${sky(data.current.weather_code)} in ${place}, sir, with a high of ${high}${chance}.`;
+}
+
+async function getWeather(args: Args, ctx: Context): Promise<Result> {
+  const place = text(args.location) || homeCity();
+  if (ctx.dryRun) return { ok: true, say: `Checking the weather in ${place}, sir.` };
+  try {
+    const find = await fetch(`https://geocoding-api.open-meteo.com/v1/search?count=1&format=json&name=${encodeURIComponent(place)}`, { signal: AbortSignal.timeout(6000) });
+    const spot = ((await find.json()) as { results?: { latitude: number; longitude: number; name: string }[] }).results?.[0];
+    if (!spot) return { ok: false, say: `I can't find a place called ${place}, sir.` };
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${spot.latitude}&longitude=${spot.longitude}&current=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max&forecast_days=2&timezone=auto`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!response.ok) throw new Error(String(response.status));
+    return { ok: true, say: weatherSentence(spot.name, (await response.json()) as Forecast, /tomorrow/i.test(text(args.when))) };
+  } catch {
+    return { ok: false, say: "I can't reach the weather service right now, sir." };
+  }
+}
+
 // ---- Sound and media --------------------------------------------------------
 
 const SINK = "@DEFAULT_AUDIO_SINK@";
@@ -268,6 +312,8 @@ async function runCommand(args: Args, ctx: Context): Promise<Result> {
 
 type Tool = {
   description: string;
+  // Reached only through exact phrases. Offering it to the model makes it the model's favourite guess.
+  fastOnly?: boolean;
   params?: Record<string, string>;
   run: (args: Args, ctx: Context) => Result | Promise<Result>;
 };
@@ -286,6 +332,11 @@ export const TOOLS: Record<string, Tool> = {
       const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
       return { ok: true, say: `It's ${time}, sir.` };
     },
+  },
+  get_weather: {
+    description: "Get the weather forecast for a place, or for home if no place is named.",
+    params: { location: "City name, or empty for home", when: "today or tomorrow" },
+    run: getWeather,
   },
   open_app: {
     description: "Open a program on the computer.",
@@ -322,6 +373,15 @@ export const TOOLS: Record<string, Tool> = {
     description: "Read battery, CPU, memory, disk or network status.",
     params: { what: "battery, cpu, memory, disk or network" },
     run: systemInfo,
+  },
+  list_projects: {
+    description: "List his coding projects.",
+    fastOnly: true,
+    run: () => {
+      const names = listProjects();
+      if (!names.length) return { ok: true, say: "You don't have any projects yet, sir." };
+      return { ok: true, say: `You have ${names.length} projects, sir: ${names.join(", ")}.` };
+    },
   },
   start_coding: {
     description: "Open a coding project in the Claude window.",
@@ -365,7 +425,7 @@ export const TOOLS: Record<string, Tool> = {
 };
 
 export function toolSchemas() {
-  return Object.entries(TOOLS).map(([name, tool]) => ({
+  return Object.entries(TOOLS).filter(([, tool]) => !tool.fastOnly).map(([name, tool]) => ({
     type: "function",
     function: {
       name,
