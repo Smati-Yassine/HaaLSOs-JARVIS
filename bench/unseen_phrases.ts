@@ -1,6 +1,13 @@
 // Tests the real brain on phrasing it was never tuned on. Nothing really runs: it's a dry run.
 // Usage: node bench/unseen_phrases.ts
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { Jarvis, unloadModel } from "../app/main/brain.ts";
+
+// These are test sentences, so they stay out of the real command log.
+process.env.JARVIS_LOG_DIR = mkdtempSync(join(tmpdir(), "jarvis-bench-"));
 
 const CASES: [string, string | null][] = [
   ["what's the time right now", "get_time"],

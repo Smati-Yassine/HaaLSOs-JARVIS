@@ -750,3 +750,29 @@ test("typing claude opens the home folder, or shows Claude if it's already open"
   assert.equal(shown, 1);
   assert.equal(started.length, 1);
 });
+
+test("answering which project with jarvis opens the Jarvis project, and his name alone gets a reply", async () => {
+  const started: string[] = [];
+  const claude = {
+    openProject: null as string | null,
+    start(project: string) {
+      started.push(project);
+      claude.openProject = project;
+    },
+    ask: () => true,
+    close() {},
+  };
+  const names = ["HaaLSO's JARVIS", "luminelle"];
+  for (const answer of ["jarvis", "Jarvis.", "the jarvis project", "jarvis one"]) {
+    started.length = 0;
+    claude.openProject = null;
+    const jarvis = new Jarvis({ dryRun: false, claude, projects: () => names });
+    assert.match((await jarvis.handle("time to work")).say, /^Which project/);
+    assert.equal((await jarvis.handle(answer)).say, "Opening Claude in HaaLSO's JARVIS, sir.", answer);
+    assert.deepEqual(started, ["HaaLSO's JARVIS"], answer);
+  }
+  claude.openProject = null;
+  const reply = await new Jarvis({ dryRun: false, claude, projects: () => names }).handle("jarvis");
+  assert.equal(reply.say, "Yes, sir?");
+  assert.equal(reply.listen, true);
+});

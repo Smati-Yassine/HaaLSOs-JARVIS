@@ -489,7 +489,7 @@ export const TOOLS: Record<string, Tool> = {
     params: { project: "Project name" },
     run: (args, ctx) => {
       const spoken = text(args.project);
-      const name = findProject(spoken, listProjects());
+      const name = findProject(spoken, ctx.projects?.() ?? listProjects());
       if (!name) return { ok: false, say: `I can't find a project called ${spoken}, sir.` };
       if (!ctx.claude) return { ok: true, say: `I found ${name}, sir, but the Claude window only works in the app.` };
       const open = ctx.claude.openProject;

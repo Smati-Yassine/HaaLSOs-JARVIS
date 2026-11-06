@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { claudeAction, clean, fastPath, looksLikeCoding, splitCommands, type Call } from "./fastpath.ts";
 import { lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
-import { claudeShortcut, listProjects, projectInSentence, projectIntent } from "./projects.ts";
+import { claudeShortcut, findProject, listProjects, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
 import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
@@ -543,13 +543,19 @@ Rewritten:`);
       this.awaitingProject = false;
       const task = this.waitingTask;
       this.waitingTask = null;
-      if (mentioned) {
-        const reply = await this.runTool({ tool: "start_coding", args: { project: mentioned } }, "fast", said, begin);
+      // Cleaning removes "jarvis" as a way of addressing him, but here it's the answer: a project.
+      const answer = mentioned ?? (/^(the |my )?jarvis( project| one)?[.!]?$/i.test(said.trim()) ? findProject("jarvis", projects) : null);
+      if (answer) {
+        this.lastProject = answer;
+        const reply = await this.runTool({ tool: "start_coding", args: { project: answer } }, "fast", said, begin);
         // Claude queues this until its session is ready.
         if (task && this.ctx.claude?.openProject) this.ctx.claude.ask(task);
         return task ? { ...reply, say: `${reply.say} I'll pass your request along.` } : reply;
       }
     }
+
+    // Just his name, with nothing after it. The model would only make something up.
+    if (!clean(said)) return { ...this.finish(said, "Yes, sir?", "fast", begin), listen: true };
 
     const shortcut = this.ctx.claude ? claudeShortcut(clean(said), projects) : null;
     if (shortcut && "project" in shortcut) {
