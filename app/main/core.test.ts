@@ -5,7 +5,8 @@ import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
 import { Jarvis, parseTextCall, pruneLog, scrubLog, speakable, toolFitsWords } from "./brain.ts";
-import { claudeAction, fastPath, looksLikeCoding, splitCommands } from "./fastpath.ts";
+import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
+import { trustSelection } from "./claude.ts";
 import { containsSecret, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { findProject, projectInSentence, projectIntent } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
@@ -514,4 +515,46 @@ test("a yes to something dangerous asks again instead of cancelling", async () =
   assert.ok(reply.pending);
   reply = await jarvis.handle("confirm");
   assert.equal(reply.tool, "run_command");
+});
+
+test("Claude can be stopped by voice", () => {
+  assert.deepEqual(claudeAction("stop claude"), { act: "interrupt", named: true });
+  assert.deepEqual(claudeAction("tell claude to stop"), { act: "interrupt", named: true });
+  assert.deepEqual(claudeAction("Jarvis, stop"), { act: "interrupt", named: false });
+  assert.equal(claudeAction("stop the music"), null);
+});
+
+test("plain stop still pauses music with no project open", async () => {
+  const claude = { openProject: null as string | null, start() {}, ask: () => true, close() {} };
+  const reply = await new Jarvis({ dryRun: true, claude, projects: () => [] }).handle("stop");
+  assert.equal(reply.tool, "media_control");
+});
+
+test("Claude's suggestions can be chosen in natural words", () => {
+  const options = ["Use PostgreSQL", "Use SQLite", "Use MongoDB", "Skip the database"];
+  for (const [said, want] of [["two", 1], ["the second one", 1], ["option 3", 2], ["Use MongoDB", 2], ["sqlite please", 1], ["skip", 3], ["Number four, sir.", 3]] as const) {
+    assert.equal(pickOption(said, options), want, said);
+  }
+  assert.equal(pickOption("what do you think", options), null);
+  assert.equal(pickOption("use", options), null);
+});
+
+test("the trust menu's selection is read from the screen", () => {
+  const no = "\x1b[1mQuick safety check\x1b[0m\n \x1b[36m❯ No, exit\x1b[0m\n   Yes, I trust this folder\n";
+  const yes = no + "\x1b[3A   No, exit\n \x1b[36m❯ Yes, I trust this folder\x1b[0m\n";
+  assert.equal(trustSelection(no), "no");
+  assert.equal(trustSelection(yes), "yes");
+  assert.equal(trustSelection(yes + "\x1b[3A \x1b[36m❯ No, exit\x1b[0m\n"), "no");
+  assert.equal(trustSelection("❯ 2. Yes, I trust this folder"), "yes");
+  assert.equal(trustSelection("still loading"), null);
+});
+
+test("with a project open, change requests always go to Claude", async () => {
+  assert.equal(looksLikeCoding("fix the typo"), false);
+  assert.equal(looksLikeCoding("fix the typo", true), true);
+  const asked: string[] = [];
+  const claude = { openProject: "tempura", start() {}, close() {}, ask: (task: string) => (asked.push(task), true) };
+  const reply = await new Jarvis({ dryRun: false, claude, projects: () => MY_PROJECTS }).handle("fix the typo in the title");
+  assert.equal(reply.tool, "ask_claude");
+  assert.deepEqual(asked, ["fix the typo in the title"]);
 });

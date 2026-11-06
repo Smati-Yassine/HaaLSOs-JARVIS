@@ -27,7 +27,7 @@ to ask_claude. A website or web address goes to open_website. Shell commands run
 paths like ~/Downloads.`;
 
 type Message = { role: string; content: string };
-export type Pending = { command: string; level: Level };
+export type Pending = { command: string; level: Level; options?: string[] };
 export type Reply = {
   say: string;
   source: "fast" | "model" | "tool";
@@ -253,9 +253,10 @@ export class Jarvis {
     const answer = (say: string) => this.finish(said, say, "fast", begin, "claude_control");
     if (!claude.openProject) {
       if (action.act === "terminal") return null; // Plain "open a terminal" still opens the app.
+      if (action.act === "interrupt" && !action.named) return null; // "Stop" can also mean the music.
       return answer("No project is open, sir. Tell me which one to start.");
     }
-    const busy = "Claude is in the middle of something, sir. I'll need it to finish first.";
+    const busy = "I can't change that right now, sir. Claude is busy or still starting.";
     switch (action.act) {
       case "effort":
         return answer(claude.setEffort?.(action.level) ? `Effort set to ${action.level}, sir.` : busy);
@@ -273,6 +274,10 @@ export class Jarvis {
         const title = claude.archive?.();
         return answer(title ? `${title} is archived, sir.` : busy);
       }
+      case "interrupt":
+        if (claude.interrupt?.()) return answer("Stopped Claude, sir.");
+        if (action.named) return answer("Claude isn't working on anything, sir.");
+        return null;
       case "hide":
         claude.setVisible?.(false);
         return answer("Claude is minimized, sir.");
@@ -384,7 +389,7 @@ export class Jarvis {
       return { say, spoken: replies.map((reply) => reply.spoken ?? reply.say).join(" "), source: "fast", tool: "several", pending: waiting?.pending, ms: Date.now() - begin };
     }
 
-    if (looksLikeCoding(said)) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
+    if (looksLikeCoding(said, Boolean(this.ctx.claude?.openProject))) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
 
     const quick = fastPath(said);
     // "Start working with it" isn't an app. Only a program that really exists opens directly.

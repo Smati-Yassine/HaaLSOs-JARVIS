@@ -107,7 +107,8 @@ export function fastPath(said: string): Call | null {
 // Plainly a coding request, so it should reach Claude without the model guessing.
 const DOES = /^(add|fix|make|change|refactor|rename|update|implement|create|write|remove|debug|move|style|center)\b/i;
 const CODE_THING = /\b(navbar|nav bar|button|css|html|component|function|class|bug|api|endpoint|database|schema|login|signup|settings page|page|footer|header|sidebar|modal|form|route|test|tests|module|dark mode|layout|responsive|sticky)\b/i;
-export const looksLikeCoding = (said: string) => DOES.test(clean(said)) && CODE_THING.test(said);
+// With a project open, any request to change something is for Claude.
+export const looksLikeCoding = (said: string, projectOpen = false) => DOES.test(clean(said)) && (projectOpen || CODE_THING.test(said));
 
 // "Open firefox and set the volume to 40" is two commands. Only splits when every part is a
 // command on its own, so "google cats and dogs" stays a single search.
@@ -120,9 +121,11 @@ export function splitCommands(said: string): string[] | null {
 // Claude's controls, by voice. Returns the action, or null if this isn't about them.
 export type ClaudeAction =
   | { act: "effort"; level: string } | { act: "model"; name: string } | { act: "session" } | { act: "terminal" }
-  | { act: "archive" } | { act: "hide" } | { act: "show" };
+  | { act: "archive" } | { act: "hide" } | { act: "show" } | { act: "interrupt"; named: boolean };
 export function claudeAction(said: string): ClaudeAction | null {
   const lower = clean(said).toLowerCase();
+  if (/\b(stop|interrupt|cancel|abort|halt)\b.*\bclaude\b|\btell claude to stop\b/.test(lower)) return { act: "interrupt", named: true };
+  if (/^(stop|interrupt|abort|halt)( that| it| working| now| please)*$/.test(lower)) return { act: "interrupt", named: false };
   const effort = lower.match(/\beffort\b.*?\b(x ?high|extra high|low|medium|high|maximum|max)\b/) ?? lower.match(/\b(x ?high|extra high|low|medium|high|maximum|max)\b.*\beffort\b/);
   if (effort) {
     const level = effort[1].replace(/^x ?high|^extra high/, "xhigh").replace("maximum", "max");
@@ -136,4 +139,26 @@ export function claudeAction(said: string): ClaudeAction | null {
   if (/\b(hide|minimi[sz]e)\b.*\bclaude\b/.test(lower)) return { act: "hide" };
   if (/\b(show|bring|open|back to)\b.*\bclaude\b/.test(lower)) return { act: "show" };
   return null;
+}
+
+const NUMBER_WORDS = ["one", "two", "three", "four", "five", "six"];
+const ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth"];
+
+// Works out which of Claude's suggestions was meant: "two", "the second one", or its words.
+export function pickOption(said: string, options: string[]): number | null {
+  const text = clean(said).toLowerCase();
+  const exact = options.findIndex((option) => option.toLowerCase() === text);
+  if (exact >= 0) return exact;
+  const number = text.match(/\b([1-9])\b/)?.[1];
+  if (number && Number(number) <= options.length) return Number(number) - 1;
+  // Ordinals first, because "the second one" also contains "one".
+  for (const words of [ORDINALS, NUMBER_WORDS]) {
+    for (let at = 0; at < options.length; at++) {
+      if (new RegExp(`\\b${words[at]}\\b`).test(text)) return at;
+    }
+  }
+  const words = text.split(/\W+/).filter((word) => word.length >= 3);
+  const scores = options.map((option) => words.filter((word) => option.toLowerCase().includes(word)).length);
+  const best = Math.max(...scores);
+  return best > 0 && scores.filter((score) => score === best).length === 1 ? scores.indexOf(best) : null;
 }

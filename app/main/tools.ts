@@ -34,6 +34,7 @@ export type ClaudeControl = {
   newTerminal?(): void;
   archive?(): string | null;
   setVisible?(visible: boolean): void;
+  interrupt?(): boolean;
 };
 export type Context = {
   dryRun: boolean;

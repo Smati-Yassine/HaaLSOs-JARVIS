@@ -51,7 +51,7 @@ declare global {
 
 const THEMES = {
   dark: { background: "#070707", foreground: "#f0f0f0", cursor: "#ffffff", selectionBackground: "#444444" },
-  light: { background: "#f7f7f4", foreground: "#161616", cursor: "#0a0a0a", selectionBackground: "#c8c8c2" },
+  light: { background: "#f6eedb", foreground: "#2b2415", cursor: "#2b2415", selectionBackground: "#dfd0a8" },
 };
 
 function savedMode(): "dark" | "light" {
@@ -85,6 +85,7 @@ function attach(id: string, parent: HTMLElement) {
     scrollback: 5000,
     allowProposedApi: true,
     theme: THEMES[savedMode()],
+    minimumContrastRatio: 4.5, // Claude's colors assume a dark screen, so this keeps them readable.
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -131,6 +132,18 @@ export function ClaudePanel({ snap, mode, onMinimize }: { snap: Snapshot; mode: 
   useEffect(() => {
     for (const live of terminals.values()) live.term.options.theme = THEMES[mode];
   }, [mode]);
+
+  // Esc stops Claude wherever the cursor is, not only inside the terminal.
+  const workingId = snap.sessions.find((session) => session.working)?.id;
+  useEffect(() => {
+    if (!workingId) return;
+    const onKey = (event: KeyboardEvent) => {
+      const inTerminal = (event.target as HTMLElement | null)?.closest?.(".terminal-host");
+      if (event.key === "Escape" && !inTerminal) window.claude.write(workingId, "\x1b");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [workingId]);
 
   const liveIds = snap.sessions.filter((session) => session.state === "running").map((session) => session.id).join(",");
   const active = snap.sessions.find((session) => session.id === snap.active) ?? null;
@@ -240,6 +253,7 @@ export function ClaudePanel({ snap, mode, onMinimize }: { snap: Snapshot; mode: 
         ) : active ? (
           <span>Plain terminal. Jarvis and Claude can't see or touch it.</span>
         ) : null}
+        {workingId && <button type="button" className="stop" onClick={() => window.claude.write(workingId, "\x1b")}>Stop</button>}
         <span className="plan">
           <Meter label="5-hour" value={snap.plan.fiveHour} hint={until(snap.plan.fiveHourResets)} />
           <Meter label="Weekly" value={snap.plan.week} warm hint={until(snap.plan.weekResets)} />

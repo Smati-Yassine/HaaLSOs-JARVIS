@@ -24,8 +24,8 @@ export const MODELS = [
 ];
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
-// Claude Code runs this for every hook and status update. If Jarvis isn't there, it stays
-// silent, and Claude Code carries on with its normal prompts.
+// Claude Code runs this for every hook and status update. It only informs Jarvis and never
+// answers, so Claude's own prompts and menus always appear on its screen.
 const BRIDGE_SCRIPT = `#!/usr/bin/env python3
 import json, socket, sys
 kind = sys.argv[1]
@@ -36,17 +36,6 @@ try:
     client.settimeout(5)
     client.connect(${JSON.stringify(SOCKET)})
     client.sendall((json.dumps({"kind": kind, "data": json.loads(raw)}) + "\\n").encode())
-    waiting = kind == "hook" and json.loads(raw).get("hook_event_name") == "PermissionRequest"
-    if waiting:
-        client.settimeout(590)
-        answer = b""
-        while not answer.endswith(b"\\n"):
-            part = client.recv(4096)
-            if not part:
-                break
-            answer += part
-        if answer.strip():
-            print(answer.decode().strip())
     client.close()
 except Exception:
     pass
@@ -74,18 +63,33 @@ export type Snapshot = {
   models: typeof MODELS;
   efforts: string[];
 };
-export type Permission = { id: number; session: string; command: string; shell: boolean };
+export type Permission = { session: string; command: string; shell: boolean };
+export type Question = { question: string; options: string[]; simple: boolean };
 
-type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean };
+type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean; leftoverInput: boolean };
 type Stored = { id: string; title: string; archived: boolean; updated: number };
 
 type Listeners = {
   changed(snapshot: Snapshot): void;
   data(session: string, data: string): void;
   permission(permission: Permission): void;
+  question(session: string, question: Question): void;
+  // Something Jarvis was asking about got answered or moved on, possibly in the terminal.
+  settled(session: string): void;
   finished(session: string, message: string): void;
   trustNeeded(project: string): void;
 };
+
+// Which answer the trust menu has selected, read from the latest screen.
+export function trustSelection(buffer: string): "yes" | "no" | null {
+  const screen = buffer.slice(-8000).replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g, "").replace(/\s/g, "");
+  const at = screen.lastIndexOf("❯");
+  if (at < 0) return null;
+  const after = screen.slice(at + 1, at + 40).replace(/^\d+\./, "");
+  if (/^Yes,?Itrust/i.test(after)) return "yes";
+  if (/^No,?exit/i.test(after)) return "no";
+  return null;
+}
 
 function describe(tool: string, input: Record<string, unknown>): { text: string; shell: boolean } {
   if (tool === "Bash") return { text: String(input.command ?? ""), shell: true };
@@ -100,8 +104,6 @@ export class ClaudeManager {
   private active: string | null = null;
   private plan: Snapshot["plan"] = { fiveHour: null, fiveHourResets: null, week: null, weekResets: null };
   private server: Server | null = null;
-  private waiting = new Map<number, Socket>();
-  private nextPermission = 1;
   private shellCount = 0;
   // A restarted session has to come back at the size of the window, or its screen garbles.
   private cols = 100;
@@ -116,10 +118,14 @@ export class ClaudeManager {
     mkdirSync(RUN, { recursive: true, mode: 0o700 });
     writeFileSync(BRIDGE, BRIDGE_SCRIPT, { mode: 0o700 });
     const run = (kind: string) => `python3 ${JSON.stringify(BRIDGE)} ${kind}`;
-    const hook = { hooks: [{ type: "command", command: run("hook"), timeout: 600 }] };
+    const hook = { hooks: [{ type: "command", command: run("hook"), timeout: 10 }] };
+    const events = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop", "SessionEnd"];
     writeFileSync(SETTINGS, JSON.stringify({
       statusLine: { type: "command", command: run("status") },
-      hooks: Object.fromEntries(["SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop", "SessionEnd"].map((event) => [event, [hook]])),
+      hooks: {
+        ...Object.fromEntries(events.map((event) => [event, [hook]])),
+        PreToolUse: [{ matcher: "AskUserQuestion", ...hook }],
+      },
     }, null, 1));
     if (existsSync(SOCKET)) rmSync(SOCKET);
     this.server = createServer((socket) => this.receive(socket));
@@ -151,7 +157,7 @@ export class ClaudeManager {
       try {
         const { kind, data } = JSON.parse(line);
         if (kind === "status") this.onStatus(data);
-        else this.onHook(data, socket);
+        else this.onHook(data);
       } catch {
         socket.destroy();
       }
@@ -180,7 +186,7 @@ export class ClaudeManager {
     this.changed();
   }
 
-  private onHook(data: Record<string, any>, socket: Socket) {
+  private onHook(data: Record<string, any>) {
     const session = this.sessions.get(data.session_id);
     switch (data.hook_event_name) {
       case "SessionStart":
@@ -202,6 +208,7 @@ export class ClaudeManager {
       case "Stop":
         if (session) {
           session.working = false;
+          this.on.settled(session.id);
           this.on.finished(session.id, String(data.last_assistant_message ?? ""));
         }
         break;
@@ -209,19 +216,34 @@ export class ClaudeManager {
         if (session) session.working = false;
         break;
       case "PermissionRequest": {
-        const id = this.nextPermission++;
-        this.waiting.set(id, socket);
-        socket.on("close", () => this.waiting.delete(id));
+        if (data.tool_name === "AskUserQuestion") return;
         const what = describe(String(data.tool_name), data.tool_input ?? {});
-        this.on.permission({ id, session: data.session_id, command: what.text, shell: what.shell });
+        this.on.permission({ session: data.session_id, command: what.text, shell: what.shell });
         return;
       }
+      case "PreToolUse": {
+        const questions = (data.tool_input?.questions ?? []) as { question: string; multiSelect?: boolean; options?: { label: string }[] }[];
+        const first = questions[0];
+        if (first) {
+          this.on.question(data.session_id, {
+            question: first.question,
+            options: (first.options ?? []).map((option) => option.label),
+            simple: questions.length === 1 && !first.multiSelect,
+          });
+        }
+        return;
+      }
+      case "PostToolUse":
+        if (session) session.working = true; // It carried on, even if Esc only closed a menu.
+        this.on.settled(data.session_id);
+        return;
     }
     this.changed();
   }
 
-  // The menu starts on "No, exit", so yes means one step down before Enter.
-  answerTrust(allow: boolean) {
+  // The menu starts on "No, exit". Keys sent before it's ready get lost, and Enter would then
+  // choose No, so Enter is only pressed once the screen shows Yes selected.
+  answerTrust(allow: boolean, onFail?: () => void) {
     const session = [...this.sessions.values()].find((item) => item.needsTrust);
     if (!session?.pty) return;
     session.needsTrust = false;
@@ -229,17 +251,50 @@ export class ClaudeManager {
       this.closeProject();
       return;
     }
-    session.pty.write("\x1b[B");
-    setTimeout(() => session.pty?.write("\r"), 300);
+    let tries = 0;
+    const step = () => {
+      if (!session.pty || session.ready) return;
+      if (trustSelection(session.buffer) === "yes") {
+        session.pty.write("\r");
+        return;
+      }
+      if (++tries > 20) {
+        session.needsTrust = true;
+        this.changed();
+        onFail?.();
+        return;
+      }
+      if (trustSelection(session.buffer) !== "yes") session.pty.write("\x1b[B");
+      setTimeout(step, 400);
+    };
+    setTimeout(step, 400);
     this.changed();
   }
 
-  answerPermission(id: number, allow: boolean) {
-    const socket = this.waiting.get(id);
-    if (!socket) return;
-    this.waiting.delete(id);
-    const decision = allow ? { behavior: "allow" } : { behavior: "deny", message: "Denied by the user through Jarvis." };
-    socket.end(JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision } }) + "\n");
+  // Answers Claude's own prompt on its screen, the same keys a person would press.
+  answerPermission(id: string, allow: boolean) {
+    this.sessions.get(id)?.pty?.write(allow ? "1" : "\x1b");
+  }
+
+  answerChoice(id: string, index: number) {
+    this.sessions.get(id)?.pty?.write(String(index + 1));
+  }
+
+  // Claude reports nothing when interrupted, so the app records it here.
+  private markStopped(session: Session) {
+    session.working = false;
+    session.leftoverInput = true; // Claude puts a stopped request back in its input box.
+    this.on.settled(session.id);
+    this.changed();
+  }
+
+  // Esc is how Claude Code stops what it's doing.
+  interrupt(): boolean {
+    const session = [...this.sessions.values()].find((item) => item.working && item.pty);
+    if (!session) return false;
+    session.pty!.write("\x1b");
+    this.markStopped(session);
+    return true;
   }
 
   // ---- Sessions ------------------------------------------------------------
@@ -286,7 +341,7 @@ export class ClaudeManager {
   private blank(id: string, kind: Session["kind"], title: string): Session {
     return {
       id, kind, title, state: "running", working: false, needsTrust: false, model: null, effort: null, context: null,
-      tokens: null, minutes: 0, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false,
+      tokens: null, minutes: 0, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, leftoverInput: false,
     };
   }
 
@@ -367,8 +422,6 @@ export class ClaudeManager {
   }
 
   closeProject() {
-    for (const socket of this.waiting.values()) socket.destroy();
-    this.waiting.clear();
     for (const session of this.sessions.values()) {
       const pty = session.pty;
       session.pty = null;
@@ -382,7 +435,9 @@ export class ClaudeManager {
   }
 
   write(id: string, data: string) {
-    this.sessions.get(id)?.pty?.write(data);
+    const session = this.sessions.get(id);
+    session?.pty?.write(data);
+    if (session?.working && data === "\x1b") this.markStopped(session);
   }
 
   resize(id: string, cols: number, rows: number) {
@@ -398,6 +453,9 @@ export class ClaudeManager {
 
   // Passes the user's exact words to Claude, as if typed.
   private type(session: Session, text: string) {
+    // Ctrl+U clears that leftover, so the new request doesn't get glued onto the old one.
+    if (session.leftoverInput) session.pty?.write("\x15");
+    session.leftoverInput = false;
     session.pty?.write(`\x1b[200~${text}\x1b[201~`);
     setTimeout(() => session.pty?.write("\r"), 150);
   }

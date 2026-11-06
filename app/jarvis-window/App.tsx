@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { ClaudePanel, type Snapshot } from "./ClaudePanel";
 import { Line, type Mood } from "./Line";
 
-type Pending = { command: string; level: "run" | "say-back" | "confirm" };
+type Pending = { command: string; level: "run" | "say-back" | "confirm"; options?: string[] };
 type Reply = { say: string; source: string; tool?: string; pending?: Pending; ms: number };
 type Message = { id: number; from: "jarvis" | "you"; text: string; pending?: Pending };
 type VoiceEvent = {
@@ -81,46 +81,6 @@ function Spoken({ text, onDone }: { text: string; onDone?: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return <p aria-label={text}>{shown}</p>;
-}
-
-// Claude's minimized form: click to bring the window back, drag to move it anywhere.
-function Bubble({ working, project, onOpen }: { working: boolean; project: string; onOpen(): void }) {
-  const element = useRef<HTMLButtonElement>(null);
-  const drag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
-  return (
-    <button
-      ref={element}
-      type="button"
-      className="bubble"
-      data-working={working}
-      aria-label={`Open Claude: ${project}`}
-      title={`Open Claude: ${project}`}
-      onPointerDown={(event) => {
-        const box = event.currentTarget.getBoundingClientRect();
-        drag.current = { dx: event.clientX - box.left, dy: event.clientY - box.top, moved: false };
-        event.currentTarget.setPointerCapture(event.pointerId);
-      }}
-      onPointerMove={(event) => {
-        if (!drag.current || !element.current) return;
-        const parent = element.current.offsetParent!.getBoundingClientRect();
-        const x = event.clientX - parent.left - drag.current.dx;
-        const y = event.clientY - parent.top - drag.current.dy;
-        drag.current.moved = true;
-        element.current.style.left = `${Math.max(4, Math.min(parent.width - 72, x))}px`;
-        element.current.style.top = `${Math.max(4, Math.min(parent.height - 72, y))}px`;
-        element.current.style.bottom = "auto";
-      }}
-      onPointerUp={() => {
-        const wasDragged = drag.current?.moved;
-        drag.current = null;
-        if (!wasDragged) onOpen();
-      }}
-    >
-      <svg viewBox="0 5 24 15" fill="#d97757" aria-hidden="true">
-        <path fillRule="evenodd" clipRule="evenodd" d="M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z" />
-      </svg>
-    </button>
-  );
 }
 
 export function App() {
@@ -224,6 +184,9 @@ export function App() {
         case "hide-claude":
           setPanelHidden(true);
           break;
+        case "settled":
+          setPending(null);
+          break;
       }
     });
   }, [speak, updateVoice]);
@@ -302,17 +265,36 @@ export function App() {
     <div className="desk">
       <div className="stage">
         <Line mood={mood} pulse={pulse} />
-        {openProject && panelHidden && (
-          <Bubble working={Boolean(claude?.sessions.some((session) => session.working))} project={openProject} onOpen={() => setPanelHidden(false)} />
-        )}
       </div>
       <section className="talk" aria-label="Conversation with Jarvis">
-        <div className="tabs" role="tablist">
-          {(["chat", "preferences"] as const).map((name) => (
-            <button key={name} type="button" role="tab" aria-selected={tab === name} onClick={() => setTab(name)}>
-              {name === "chat" ? "Chat" : "Preferences"}
+        <div className="tabs">
+          <button type="button" aria-selected={tab === "chat"} onClick={() => setTab("chat")}>Chat</button>
+          <span className="tabs-gap" />
+          {openProject && (
+            <button
+              type="button"
+              className="icon-tab claude-tab"
+              data-working={Boolean(claude?.sessions.some((session) => session.working))}
+              aria-label={panelHidden ? `Open Claude: ${openProject}` : "Hide Claude"}
+              title={panelHidden ? `Open Claude: ${openProject}` : "Hide Claude"}
+              onClick={() => setPanelHidden((value) => !value)}
+            >
+              <svg viewBox="0 0 24 24" fill="#d97757" aria-hidden="true"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" /></svg>
             </button>
-          ))}
+          )}
+          <button
+            type="button"
+            className="icon-tab"
+            aria-label="Preferences"
+            title="Preferences"
+            aria-pressed={tab === "preferences"}
+            onClick={() => setTab((now) => (now === "preferences" ? "chat" : "preferences"))}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+            </svg>
+          </button>
         </div>
 
         <div className="pane" hidden={tab !== "chat"}>
@@ -324,17 +306,28 @@ export function App() {
                     {message.from === "jarvis" ? <Spoken text={message.text} onDone={scrollDown} /> : <p>{message.text}</p>}
                     {message.pending && pending === message.pending && (
                       <div className="choices">
-                        <code>{message.pending.command}</code>
-                        <button
-                          type="button"
-                          className={message.pending.level === "confirm" ? "choice danger" : "choice"}
-                          onClick={() => send(message.pending!.level === "confirm" ? "confirm" : "yes")}
-                        >
-                          {message.pending.level === "confirm" ? "Confirm" : "Go ahead"}
-                        </button>
-                        <button type="button" className="choice" onClick={() => send("cancel")}>
-                          Cancel
-                        </button>
+                        {message.pending.options ? (
+                          <>
+                            {message.pending.options.map((option, index) => (
+                              <button key={option} type="button" className="choice" onClick={() => send(option)}>
+                                {index + 1}. {option}
+                              </button>
+                            ))}
+                            <button type="button" className="choice" onClick={() => send("cancel")}>Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <code>{message.pending.command}</code>
+                            <button
+                              type="button"
+                              className={message.pending.level === "confirm" ? "choice danger" : "choice"}
+                              onClick={() => send(message.pending!.level === "confirm" ? "confirm" : "yes")}
+                            >
+                              {message.pending.level === "confirm" ? "Confirm" : "Go ahead"}
+                            </button>
+                            <button type="button" className="choice" onClick={() => send("cancel")}>Cancel</button>
+                          </>
+                        )}
                       </div>
                     )}
                   </div>
