@@ -51,8 +51,8 @@ contextBridge.exposeInMainWorld("claude", {
     ipcRenderer.on("claude:changed", handler);
     return () => ipcRenderer.removeListener("claude:changed", handler);
   },
-  onData: (listener: (id: string, data: string) => void) => {
-    const handler = (_event: unknown, id: string, data: string) => listener(id, data);
+  onData: (listener: (id: string, data: string, end: number) => void) => {
+    const handler = (_event: unknown, id: string, data: string, end: number) => listener(id, data, end);
     ipcRenderer.on("claude:data", handler);
     return () => ipcRenderer.removeListener("claude:data", handler);
   },

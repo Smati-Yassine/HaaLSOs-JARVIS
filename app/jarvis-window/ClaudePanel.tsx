@@ -37,7 +37,7 @@ declare global {
   interface Window {
     claude: {
       snapshot(): Promise<Snapshot>;
-      buffer(id: string): Promise<string>;
+      buffer(id: string): Promise<{ text: string; end: number }>;
       write(id: string, data: string): void;
       resize(id: string, cols: number, rows: number): void;
       select(id: string): void;
@@ -50,7 +50,7 @@ declare global {
       setBypass(on: boolean): void;
       closeProject(): void;
       onChange(listener: (snapshot: Snapshot) => void): () => void;
-      onData(listener: (id: string, data: string) => void): () => void;
+      onData(listener: (id: string, data: string, end: number) => void): () => void;
     };
   }
 }
@@ -69,7 +69,8 @@ function savedMode(): "dark" | "light" {
 }
 
 // One terminal per session. They stay alive when hidden, so switching keeps their screens.
-type Live = { term: Terminal; fit: FitAddon; host: HTMLDivElement; early: string[] | null };
+type Chunk = { data: string; end: number };
+type Live = { term: Terminal; fit: FitAddon; host: HTMLDivElement; early: Chunk[] | null; replayed: number };
 const terminals = new Map<string, Live>();
 
 function refit(id: string) {
@@ -99,13 +100,16 @@ function attach(id: string, parent: HTMLElement) {
   term.loadAddon(fit);
   term.open(host);
   term.onData((data) => window.claude.write(id, data));
-  const live: Live = { term, fit, host, early: [] };
+  const live: Live = { term, fit, host, early: [], replayed: 0 };
   terminals.set(id, live);
   fit.fit();
   window.claude.resize(id, term.cols, term.rows);
-  // The saved screen already includes anything sent before this point.
-  window.claude.buffer(id).then((text) => {
+  // The saved screen is replayed first. Output can reach the window either side of that reply,
+  // so anything the replay already included is skipped, or the session's start shows up twice.
+  window.claude.buffer(id).then(({ text, end }) => {
     if (text) term.write(text);
+    live.replayed = end;
+    for (const chunk of live.early ?? []) if (chunk.end > end) term.write(chunk.data);
     live.early = null;
   });
 }
@@ -189,9 +193,11 @@ export function ClaudePanel({ snap, mode, asking, choosing, onChosen }: { snap: 
   const area = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    return window.claude.onData((id, data) => {
+    return window.claude.onData((id, data, end) => {
       const live = terminals.get(id);
-      if (live && !live.early) live.term.write(data);
+      if (!live) return;
+      if (live.early) live.early.push({ data, end });
+      else if (end > live.replayed) live.term.write(data);
     });
   }, []);
 
@@ -299,7 +305,7 @@ function useRoom() {
     return () => removeEventListener("resize", onResize);
   }, []);
   if (width < 760) return { claudes: Math.max(1, Math.floor((width * 0.62) / 120)), shells: 1 };
-  const side = (width - Math.min(600, width * 0.44)) / 2;
+  const side = (width - Math.min(560, width * 0.4)) / 2;
   return { claudes: Math.max(1, Math.floor((side - 32) / 120)), shells: Math.max(1, Math.floor((side - 114) / 90)) };
 }
 
@@ -333,11 +339,12 @@ export function ClaudeBand({ snap, engine, asking, choosing, onToggleChoosing }:
 
   // Claude's question belongs to the session that's busy, or else the one in front of you.
   const askingId = asking ? (snap.sessions.find((session) => session.working)?.id ?? snap.active) : null;
-  const signature = onLine.map((session) => `${session.id}:${session.id === snap.active}:${session.working}:${session.id === askingId}`).join();
+  const signature = onLine.map((session) => `${session.id}:${session.title}:${session.id === snap.active}:${session.working}:${session.id === askingId}`).join();
   useEffect(() => {
     const items: StrandItem[] = onLine.map((session) => ({
       id: session.id,
       kind: session.kind,
+      title: session.title,
       active: session.id === snap.active,
       working: session.working,
       asking: session.id === askingId,
@@ -355,9 +362,19 @@ export function ClaudeBand({ snap, engine, asking, choosing, onToggleChoosing }:
           key={session.id}
           ref={(element) => engine.label(session.id, element)}
           className={`label ${session.kind}${session.id === snap.active ? " on" : ""}${session.id === askingId ? " asking" : ""}`}
+          onPointerEnter={() => (engine.hovered = session.id)}
+          onPointerLeave={() => (engine.hovered = null)}
         >
-          <button type="button" className="label-main" title={session.title} onClick={() => window.claude.select(session.id)}>{session.title}</button>
-          {session.context !== null && <span className="pct">{percent(session.context)}</span>}
+          <button
+            type="button"
+            className="label-main"
+            title={session.title}
+            aria-current={session.id === snap.active ? "true" : undefined}
+            onClick={() => window.claude.select(session.id)}
+          >
+            {session.kind === "shell" && <i>&gt;</i>}
+            {session.title}
+          </button>
           <button type="button" className="label-x" aria-label={`${session.kind === "claude" ? "Archive" : "Close"} ${session.title}`} onClick={() => window.claude.archive(session.id)}>×</button>
         </div>
       ))}

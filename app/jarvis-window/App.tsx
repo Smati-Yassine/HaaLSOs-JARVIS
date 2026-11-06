@@ -210,14 +210,21 @@ function Timers({ engine }: { engine: LineEngine }) {
       if (!firstSeen.current.has(item.id)) firstSeen.current.set(item.id, now);
       const start = firstSeen.current.get(item.id)!;
       const frac = item.due > start ? (item.due - now) / (item.due - start) : 0;
-      return { id: `reminder-${item.id}`, kind: "timer", active: false, working: false, asking: false, frac };
+      return { id: `reminder-${item.id}`, kind: "timer", title: reminderTitle(item), active: false, working: false, asking: false, frac };
     });
     engine.sync("timers", strands);
   }, [engine, items, now]);
   return (
     <div className="band">
       {items.map((item) => (
-        <div key={item.id} ref={(element) => engine.label(`reminder-${item.id}`, element)} className="label timer" title={reminderTitle(item)}>
+        <div
+          key={item.id}
+          ref={(element) => engine.label(`reminder-${item.id}`, element)}
+          className="label timer"
+          title={reminderTitle(item)}
+          onPointerEnter={() => (engine.hovered = `reminder-${item.id}`)}
+          onPointerLeave={() => (engine.hovered = null)}
+        >
           <span className="label-main">{reminderLabel(item, now)}</span>
           <button type="button" className="label-x" aria-label={`Cancel: ${reminderTitle(item)}`} onClick={() => window.jarvis.deleteReminder(item.id).then(() => setItems((list) => list.filter((other) => other.id !== item.id)))}>×</button>
         </div>

@@ -55,8 +55,8 @@ const claude = new ClaudeManager({
   changed(snapshot) {
     window?.webContents.send("claude:changed", snapshot);
   },
-  data(id, data) {
-    window?.webContents.send("claude:data", id, data);
+  data(id, data, end) {
+    window?.webContents.send("claude:data", id, data, end);
   },
   permission(permission) {
     const level = permission.shell ? classifyForClaude(permission.command) : "say-back";

@@ -174,12 +174,13 @@ export type Gate = "trust" | "bypass";
 export type Permission = { session: string; command: string; shell: boolean; menu: Menu | null };
 export type Question = { question: string; options: string[]; simple: boolean };
 
-type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number; resumeHandled: boolean };
+type Session = SessionView & { pty: IPty | null; buffer: string; sent: number; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number; resumeHandled: boolean };
 type Stored = { id: string; title: string; archived: boolean; updated: number };
 
 type Listeners = {
   changed(snapshot: Snapshot): void;
-  data(session: string, data: string): void;
+  // "end" is how much the session has produced after this chunk, so a screen knows what it has seen.
+  data(session: string, data: string, end: number): void;
   permission(permission: Permission): void;
   question(session: string, question: Question): void;
   // Something Jarvis was asking about got answered or moved on, possibly in the terminal.
@@ -568,7 +569,8 @@ export class ClaudeManager {
     pty.onData((data) => {
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
       session.screen?.write(data);
-      this.on.data(session.id, data);
+      session.sent += data.length;
+      this.on.data(session.id, data, session.sent);
       if (session.kind === "claude") this.watchStartup(session);
     });
     pty.onExit(() => {
@@ -625,7 +627,7 @@ export class ClaudeManager {
   private blank(id: string, kind: Session["kind"], title: string): Session {
     return {
       id, kind, title, state: "running", working: false, needsTrust: false, model: null, effort: null, context: null,
-      tokens: null, minutes: 0, elsewhere: false, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, bypassAsked: false, gate: null, leftoverInput: false,
+      tokens: null, minutes: 0, elsewhere: false, pty: null, buffer: "", sent: 0, queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, bypassAsked: false, gate: null, leftoverInput: false,
       screen: kind === "claude" ? new headless.Terminal({ cols: this.cols, rows: this.rows, scrollback: 0, allowProposedApi: true }) : null, askSeq: 0, resumeHandled: false,
     };
   }
@@ -644,7 +646,8 @@ export class ClaudeManager {
     session.gate = null;
     session.buffer = "";
     session.screen?.reset();
-    this.on.data(session.id, "\x1b[2J\x1b[3J\x1b[H");
+    session.sent += 1;
+    this.on.data(session.id, "\x1b[2J\x1b[3J\x1b[H", session.sent);
     this.spawnInto(session, "claude", args);
   }
 
@@ -799,7 +802,8 @@ export class ClaudeManager {
   }
 
   buffer(id: string) {
-    return this.sessions.get(id)?.buffer ?? "";
+    const session = this.sessions.get(id);
+    return { text: session?.buffer ?? "", end: session?.sent ?? 0 };
   }
 
   // Passes the user's exact words to Claude, as if typed.

@@ -5,7 +5,7 @@ import { useEffect, useRef } from "react";
 
 export type Mood = "idle" | "listening" | "thinking" | "speaking";
 export type Snap = "high" | "mid" | "low";
-export type StrandItem = { id: string; kind: "claude" | "shell" | "timer"; active: boolean; working: boolean; asking: boolean; frac: number };
+export type StrandItem = { id: string; kind: "claude" | "shell" | "timer"; title: string; active: boolean; working: boolean; asking: boolean; frac: number };
 
 const MOODS: Record<Mood, { energy: number; speed: number; think: number }> = {
   idle: { energy: 0.06, speed: 1, think: 0 },
@@ -19,11 +19,18 @@ const LAYERS = [
   { alpha: 0.16, freqA: 2.1, freqB: 1.3, drift: 0.8, glow: 0 },
 ];
 type Layer = (typeof LAYERS)[number];
-type Strand = { item: StrandItem; group: string; depth: number; x1: number | null; x2: number; tx1: number; tx2: number; dying: boolean };
+type Strand = { item: StrandItem; group: string; depth: number; x1: number | null; x2: number; tx1: number; tx2: number; dying: boolean; textWidth: number; hover: number };
 type Packet = { strand: Strand; toClaude: boolean; progress: number };
 
 const TAU = Math.PI * 2;
 const NARROW = 760; // Must match the max-width media query in styles.css.
+// A tab is a rounded pod hanging off the line, the same shape as the message box, with its title inside.
+const CORNER = 18;
+const POD_DEPTH = 27;
+const POD_PADDING = 36;
+const POD_MIN = 76;
+const POD_MAX = 216;
+const POD_GAP = 4;
 const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function stored(key: string): string | null {
@@ -68,6 +75,7 @@ export class LineEngine {
   private decisionHeight = 0;
   private written = { y: -1, boxTop: -1, tight: false };
   private segments: [number, number][] = [[0, 1]];
+  private podSpans: { from: number; to: number; strength: number }[] = [];
   private strands = new Map<string, Strand>();
   private labels = new Map<string, HTMLElement>();
   private packets: Packet[] = [];
@@ -151,13 +159,23 @@ export class LineEngine {
     }
     for (const item of items) {
       const strand = this.strands.get(item.id);
+      const textWidth = this.measure(item);
       if (strand) {
         strand.item = item;
         strand.dying = false;
+        strand.textWidth = textWidth;
       } else {
-        this.strands.set(item.id, { item, group, depth: 0, x1: null, x2: 0, tx1: 0, tx2: 0, dying: false });
+        this.strands.set(item.id, { item, group, depth: 0, x1: null, x2: 0, tx1: 0, tx2: 0, dying: false, textWidth, hover: 0 });
       }
     }
+  }
+  private measure(item: StrandItem) {
+    if (!this.ctx) return 80;
+    this.ctx.save();
+    this.ctx.font = item.kind === "shell" ? '400 12px "Geist Mono Variable"' : '500 13px "Geist Variable"';
+    const width = this.ctx.measureText(item.kind === "shell" ? `> ${item.title}` : item.title).width;
+    this.ctx.restore();
+    return width + 4;
   }
   label(id: string, element: HTMLElement | null) {
     if (element) this.labels.set(id, element);
@@ -212,6 +230,13 @@ export class LineEngine {
     };
     addEventListener("resize", resize);
     resize();
+    // A title measured before its font arrives comes out too narrow, so measure again once it has.
+    const remeasure = () => {
+      for (const strand of this.strands.values()) strand.textWidth = this.measure(strand.item);
+    };
+    document.fonts.addEventListener("loadingdone", remeasure);
+    void document.fonts.load('400 12px "Geist Mono Variable"');
+    void document.fonts.load('500 13px "Geist Variable"');
     if (!this.y) this.y = this.targetY();
     let frame = 0;
     let last = performance.now();
@@ -225,6 +250,7 @@ export class LineEngine {
     return () => {
       cancelAnimationFrame(frame);
       removeEventListener("resize", resize);
+      document.fonts.removeEventListener("loadingdone", remeasure);
     };
   }
 
@@ -247,88 +273,142 @@ export class LineEngine {
 
   private layerY(x: number, segment: [number, number], layer: Layer) {
     const u = (x - segment[0]) / (segment[1] - segment[0]);
-    const envelope = Math.sin(Math.PI * Math.min(u, 1)) ** 2;
+    const envelope = Math.sin(Math.PI * Math.min(u, 1)) ** 2 * this.calmUnderPods(x);
     const wave =
       Math.sin(u * layer.freqA * TAU + this.time * layer.drift * 2) * 0.6 +
       Math.sin(u * layer.freqB * TAU - this.time * layer.drift * 3) * 0.4;
     return this.y + envelope * this.amplitude * wave;
+  }
+  // The line settles where a tab hangs from it, so titles stay readable while Jarvis speaks.
+  private calmUnderPods(x: number) {
+    let calmness = 1;
+    for (const pod of this.podSpans) {
+      const outside = Math.max(pod.from - x, x - pod.to, 0);
+      if (outside < 36) calmness = Math.min(calmness, 1 - pod.strength * 0.86 * (1 - outside / 36) ** 2);
+    }
+    return calmness;
   }
   private waveY(x: number) {
     const segment = this.segments.find((part) => x >= part[0] && x <= part[1]);
     return segment ? this.layerY(x, segment, LAYERS[0]) : this.y;
   }
 
-  private placeStrands() {
-    const live = [...this.strands.values()].filter((strand) => !strand.dying);
-    const claudes = live.filter((strand) => strand.item.kind === "claude");
-    const shells = live.filter((strand) => strand.item.kind === "shell");
-    const timers = live.filter((strand) => strand.item.kind === "timer");
-    // Until the box has been measured, or on a narrow window, the line is one unbroken piece.
-    const whole = this.segments.length < 2;
-    const leftEnd = whole ? this.width * 0.62 : this.segments[0][1] - 14;
-    const rightStart = whole ? this.width * 0.62 : this.segments[1][0] + 14;
-    const rightEnd = this.width - 100; // Clear of the +, minimize and close buttons.
-    claudes.forEach((strand, index) => {
-      const width = Math.min(190, (leftEnd - 18) / claudes.length);
-      strand.tx1 = 18 + index * width;
-      strand.tx2 = strand.tx1 + width - 12;
-    });
-    shells.forEach((strand, index) => {
-      const width = Math.min(130, (rightEnd - rightStart) / shells.length);
-      strand.tx1 = rightStart + index * width;
-      strand.tx2 = strand.tx1 + width - 10;
-    });
-    const timerStart = this.narrow ? 18 : rightStart;
-    const timerRoom = this.narrow ? this.width - 36 : rightEnd - rightStart;
-    timers.forEach((strand, index) => {
-      const width = Math.min(170, timerRoom / timers.length);
-      strand.tx1 = timerStart + index * width;
-      strand.tx2 = strand.tx1 + 58 + (width - 70) * Math.max(0, strand.item.frac);
+  // Lays pods out from one end of a stretch of line, each as wide as its title. If they don't all
+  // fit, they share what's there and the titles shorten.
+  private layOut(pods: Strand[], start: number, end: number) {
+    if (!pods.length) return;
+    const wanted = pods.map((pod) => Math.max(POD_MIN, Math.min(POD_MAX, pod.textWidth + POD_PADDING)));
+    const room = end - start - POD_GAP * (pods.length - 1);
+    // Only the longest titles give way, so short ones are never cut off to make room for them.
+    let cap = POD_MAX;
+    const used = () => wanted.reduce((sum, width) => sum + Math.min(width, cap), 0);
+    while (cap > 40 && used() > room) cap -= 2;
+    let x = start;
+    pods.forEach((pod, index) => {
+      pod.tx1 = x;
+      pod.tx2 = x + Math.min(wanted[index], cap);
+      x = pod.tx2 + POD_GAP;
     });
   }
+  private placeStrands() {
+    const live = [...this.strands.values()].filter((strand) => !strand.dying);
+    // Until the box has been measured, or on a narrow window, the line is one unbroken piece.
+    const whole = this.segments.length < 2;
+    const leftEnd = whole ? this.width * 0.6 : this.segments[0][1] - 12;
+    const rightStart = whole ? this.width * 0.6 : this.segments[1][0] + 12;
+    this.layOut(live.filter((strand) => strand.item.kind === "claude"), 12, leftEnd);
+    this.layOut(live.filter((strand) => strand.item.kind === "shell"), rightStart, this.width - 100); // Clear of the buttons.
+    // Timers hang above the line from the far right, and shrink back toward it as time runs out.
+    let right = this.width - 12;
+    for (const pod of live.filter((strand) => strand.item.kind === "timer")) {
+      pod.tx2 = right;
+      pod.tx1 = right - (72 + 70 * Math.max(0, Math.min(1, pod.item.frac)));
+      right = pod.tx1 - POD_GAP;
+    }
+  }
   private strandLift(strand: Strand, x: number) {
-    const edge = Math.min(x - strand.x1!, strand.x2 - x) / 40;
+    const edge = Math.min(x - strand.x1!, strand.x2 - x) / CORNER;
     if (edge <= 0) return 0;
-    return edge >= 1 ? 1 : edge * edge * (3 - 2 * edge);
+    // A quarter of an ellipse, for a rounded corner.
+    return edge >= 1 ? 1 : Math.sqrt(1 - (1 - edge) ** 2);
   }
   private drawStrand(ctx: CanvasRenderingContext2D, strand: Strand, dt: number) {
     if (strand.x1 === null) {
       strand.x1 = strand.tx1;
       strand.x2 = strand.tx2;
     }
-    const ease = 1 - Math.exp(-dt * 8);
+    const ease = 1 - Math.exp(-dt * 10);
     strand.x1 += (strand.tx1 - strand.x1) * ease;
     strand.x2 += (strand.tx2 - strand.x2) * ease;
     const { item } = strand;
-    // A question flips Claude's strand up through the line, onto Jarvis's side.
-    const want = strand.dying ? 0 : item.kind === "timer" ? -20 : item.asking ? -24 : 18;
-    strand.depth += (want - strand.depth) * (1 - Math.exp(-dt * (strand.dying ? 9 : 6)));
+    // A question flips Claude's pod up through the line, onto Jarvis's side.
+    const want = strand.dying ? 0 : item.kind === "timer" ? -23 : item.asking ? -POD_DEPTH : POD_DEPTH;
+    strand.depth += (want - strand.depth) * (1 - Math.exp(-dt * (strand.dying ? 12 : 8)));
+    strand.hover += ((this.hovered === item.id ? 1 : 0) - strand.hover) * (1 - Math.exp(-dt * 14));
+
+    const span = strand.x2 - strand.x1;
     const label = this.labels.get(item.id);
     if (label) {
-      label.style.left = `${strand.x1 + 6}px`;
-      label.style.width = `${Math.max(0, strand.x2 - strand.x1 - 12)}px`;
+      // The title rides inside its pod, so the pod and its title sway with the line together.
+      const middle = this.waveY(strand.x1 + span / 2) - this.y + strand.depth / 2;
+      label.style.left = `${strand.x1}px`;
+      label.style.width = `${Math.max(0, span)}px`;
+      label.style.transform = `translateY(${middle - 12}px)`;
+      label.style.opacity = String(Math.min(1, Math.abs(strand.depth) / 18));
     }
-    if (strand.x2 - strand.x1 < 4) return;
+    if (span < 4) return;
+
     const color = item.asking ? this.tokens.amber : item.kind === "claude" ? this.tokens.claude : item.kind === "timer" ? this.tokens.ink : this.tokens.mute;
-    const tremble = item.asking ? 1.2 : item.working ? 2.4 : 0;
     const strong = item.active || item.asking;
-    ctx.beginPath();
-    let started = false;
-    for (let x = strand.x1; x <= strand.x2 + 2; x += 3) {
-      const at = Math.min(x, strand.x2);
-      const lift = this.strandLift(strand, at);
-      const shake = calm ? 0 : tremble * lift * Math.sin(at * 0.11 + this.time * 13);
-      const y = this.waveY(at) + (strand.depth + shake) * lift;
-      if (started) ctx.lineTo(at, y);
-      else ctx.moveTo(at, y);
-      started = true;
+    // Finely around the corners, where the curve is tight, and coarsely along the flat.
+    const points: [number, number][] = [];
+    const add = (x: number) => points.push([x, this.waveY(x) + strand.depth * this.strandLift(strand, x)]);
+    const fine = Math.min(CORNER, span / 2);
+    for (let x = 0; x < fine; x += x < 3 ? 0.25 : 1) add(strand.x1 + x);
+    for (let x = strand.x1 + fine; x < strand.x2 - fine; x += 4) add(x);
+    for (let x = fine; x >= 0; x -= x <= 3 ? 0.25 : 1) add(strand.x2 - x);
+
+    // The open tab is filled with its colour, fading out toward the line.
+    const fill = strong ? (this.tokens.glow ? 0.17 : 0.2) : strand.hover * 0.09;
+    if (fill > 0.004) {
+      ctx.beginPath();
+      points.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      for (let x = strand.x2; x > strand.x1; x -= 6) ctx.lineTo(x, this.waveY(x));
+      ctx.closePath();
+      const gradient = ctx.createLinearGradient(0, this.y, 0, this.y + strand.depth);
+      gradient.addColorStop(0, "transparent");
+      gradient.addColorStop(1, color);
+      ctx.globalAlpha = fill;
+      ctx.fillStyle = gradient;
+      ctx.fill();
     }
-    ctx.globalAlpha = item.kind === "timer" ? 0.75 : strong ? 1 : 0.5;
+    ctx.beginPath();
+    points.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    const pulse = item.asking && !calm ? 0.75 + 0.25 * Math.sin(this.time * 5) : 1;
+    ctx.globalAlpha = (item.kind === "timer" ? 0.55 : strong ? 1 : 0.42 + strand.hover * 0.4) * pulse;
     ctx.strokeStyle = color;
-    ctx.lineWidth = strong ? 1.6 : 1;
+    ctx.lineWidth = strong ? 1.5 : 1.2;
+    ctx.lineJoin = "round";
     ctx.shadowColor = color;
-    ctx.shadowBlur = (strong ? 10 : 0) * this.tokens.glow;
+    ctx.shadowBlur = (strong ? 9 : 0) * this.tokens.glow;
     ctx.stroke();
+
+    // While a session works, a light runs back and forth along its pod.
+    if (item.working && !item.asking && !calm && span > 2 * CORNER + 24) {
+      const start = strand.x1 + CORNER + (Math.sin(this.time * 2.2) * 0.5 + 0.5) * (span - 2 * CORNER - 24);
+      ctx.beginPath();
+      for (let x = start; x <= start + 24; x += 3) {
+        const y = this.waveY(x) + strand.depth;
+        if (x === start) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = this.tokens.ink;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 12 * this.tokens.glow;
+      ctx.stroke();
+    }
     ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
   }
@@ -361,7 +441,7 @@ export class LineEngine {
     s.kick *= 0.9;
     const wantHot = this.dragging || this.handleHover ? 1 : 0;
     this.hot += (wantHot - this.hot) * (1 - Math.exp(-dt * 12));
-    this.reach += ((this.project ? 110 : this.narrow ? 300 : 430) - this.reach) * (1 - Math.exp(-dt * 3));
+    this.reach += ((this.project ? 70 : this.narrow ? 300 : 430) - this.reach) * (1 - Math.exp(-dt * 3));
 
     if (!this.dragging) {
       const target = this.targetY();
@@ -385,6 +465,7 @@ export class LineEngine {
       this.segments = [[0, left], [left + this.boxWidth, this.width]];
     }
     this.placeStrands();
+    this.podSpans = [...this.strands.values()].filter((pod) => pod.x1 !== null).map((pod) => ({ from: pod.x1!, to: pod.x2, strength: Math.min(1, Math.abs(pod.depth) / 18) }));
 
     ctx.clearRect(0, 0, this.width, this.height);
     const talk = (Math.sin(this.time * 11) * 0.5 + Math.sin(this.time * 6.7) * 0.3 + Math.sin(this.time * 17.3) * 0.2) * 0.5 + 0.5;
@@ -437,6 +518,7 @@ export class LineEngine {
   }
 
   handleHover = false;
+  hovered: string | null = null;
 }
 
 export function Line({ engine, mood, pulse, movable }: { engine: LineEngine; mood: Mood; pulse: number; movable: boolean }) {
