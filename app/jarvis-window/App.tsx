@@ -26,6 +26,9 @@ declare global {
       setTheme(mode: "dark" | "light"): Promise<void>;
       setMuted(muted: boolean): Promise<void>;
       voiceAvailable(): Promise<boolean>;
+      health(): Promise<string[]>;
+      getAutostart(): Promise<boolean>;
+      setAutostart(enabled: boolean): Promise<boolean>;
       minimize(): void;
       toggleMaximize(): void;
       close(): void;
@@ -132,6 +135,7 @@ export function App() {
   const [pending, setPending] = useState<Pending | null>(null);
   const [voice, setVoice] = useState<VoiceStatus>("off");
   const voiceRef = useRef<VoiceStatus>("off");
+  const [autostart, setAutostart] = useState(false);
   const [claude, setClaude] = useState<Snapshot | null>(null);
   const [panelHidden, setPanelHidden] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
@@ -185,6 +189,9 @@ export function App() {
           updateVoice("off");
           setMood("idle");
           break;
+        case "voice-restarting":
+          updateVoice("loading");
+          break;
         case "wake":
           setHints(false);
           setMood("listening");
@@ -219,6 +226,7 @@ export function App() {
   }, [speak, updateVoice]);
 
   useEffect(() => {
+    window.jarvis.getAutostart().then(setAutostart);
     window.claude.snapshot().then(setClaude);
     return window.claude.onChange(setClaude);
   }, []);
@@ -236,6 +244,11 @@ export function App() {
         const welcome = ready ? "Welcome back, sir. All systems online." : "Welcome back, sir. Ollama isn't running, so I can only do simple commands.";
         speak(welcome);
         window.jarvis.welcome(welcome);
+        // Only speaks up when something's actually wrong. "Ollama isn't running" is already said.
+        window.jarvis.health().then((problems) => {
+          const rest = problems.filter((problem) => !problem.startsWith("Ollama"));
+          if (rest.length) window.setTimeout(() => speak(`One thing to know, sir: ${rest.join("; ")}.`), 2500);
+        });
         setBusy(false);
         input.current?.focus();
       }, Math.max(0, 900 - (Date.now() - started)));
@@ -390,6 +403,19 @@ export function App() {
               {(["dark", "light"] as const).map((name) => (
                 <button key={name} type="button" aria-pressed={mode === name} onClick={() => setMode(name)}>
                   {name === "dark" ? "Dark" : "Light"}
+                </button>
+              ))}
+            </div>
+            <h2 id="login" className="pref-gap">Start with your computer</h2>
+            <div className="segments" role="group" aria-labelledby="login">
+              {[true, false].map((enabled) => (
+                <button
+                  key={String(enabled)}
+                  type="button"
+                  aria-pressed={autostart === enabled}
+                  onClick={() => window.jarvis.setAutostart(enabled).then(setAutostart)}
+                >
+                  {enabled ? "On" : "Off"}
                 </button>
               ))}
             </div>

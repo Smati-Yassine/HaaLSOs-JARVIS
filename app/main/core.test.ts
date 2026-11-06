@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
 import { Jarvis, parseTextCall, speakable } from "./brain.ts";
 import { fastPath } from "./fastpath.ts";
+import { containsSecret, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { findProject } from "./projects.ts";
 import { classify, isApproval } from "./safety.ts";
 import { findApp, googleUrl, websiteUrl } from "./tools.ts";
@@ -158,4 +162,82 @@ test("while a project is open, coding goes to Claude with the exact words", asyn
   assert.deepEqual(asked, ["clean up the build folder"]);
   assert.equal(reply.pending, undefined);
   assert.match(reply.say, /Passing that to Claude/);
+});
+
+test("memory keeps, finds and really forgets things", () => {
+  const memory = new Memory(":memory:");
+  assert.match(memoryCommand("remember that my dentist is Dr Ben Ali", memory)!, /remember/);
+  memoryCommand("remember I prefer Brave", memory);
+  assert.deepEqual(memory.search("who is my dentist"), ["my dentist is Dr Ben Ali"]);
+  assert.match(memoryCommand("what do you remember about dentist", memory)!, /Ben Ali/);
+  assert.match(memoryCommand("what do you remember", memory)!, /Brave/);
+  assert.match(memoryCommand("forget that", memory)!, /I prefer Brave/);
+  assert.deepEqual(memory.facts(), ["my dentist is Dr Ben Ali"]);
+  memory.addTurn("user", "my dentist called today");
+  assert.match(memoryCommand("forget dentist", memory)!, /removed 2 items/);
+  assert.deepEqual(memory.facts(), []);
+  assert.deepEqual(memory.said(0, Date.now() + 1), []);
+  assert.match(memoryCommand("forget dentist", memory)!, /don't have anything/);
+});
+
+test("forgetting one thing doesn't wipe everything sharing a common word", () => {
+  const memory = new Memory(":memory:");
+  memory.remember("my car is blue");
+  memory.remember("my dentist is Dr Ben Ali");
+  memory.forget("my car");
+  assert.deepEqual(memory.facts(), ["my dentist is Dr Ben Ali"]);
+});
+
+test("passwords are never stored", () => {
+  const memory = new Memory(":memory:");
+  assert.equal(containsSecret("my api key is abc"), true);
+  assert.match(memoryCommand("remember my password is hunter2", memory)!, /won't store/);
+  memory.addTurn("user", "my password is hunter2");
+  assert.deepEqual(memory.facts(), []);
+  assert.deepEqual(memory.said(0, Date.now() + 1), []);
+});
+
+test("asking about a day reads only that day", () => {
+  const memory = new Memory(":memory:");
+  const now = new Date(2026, 10, 6, 15);
+  memory.addTurn("user", "open firefox", new Date(2026, 10, 5, 20).getTime());
+  memory.addTurn("user", "tell me a joke", new Date(2026, 10, 6, 9).getTime());
+  assert.match(memoryCommand("what did I ask you yesterday", memory, now)!, /open firefox/);
+  assert.doesNotMatch(memoryCommand("what did I ask you yesterday", memory, now)!, /joke/);
+  assert.match(memoryCommand("what did I say today", memory, now)!, /joke/);
+});
+
+test("search text can't break out of the query", () => {
+  assert.equal(searchTerms('x" OR 1=1 --'), null);
+  assert.equal(searchTerms('dentist" OR "secret'), '"dentist" OR "secret"');
+  assert.doesNotThrow(() => new Memory(":memory:").search('"; DROP TABLE facts; --'));
+});
+
+test("a stray yes does nothing", async () => {
+  const jarvis = new Jarvis({ dryRun: true });
+  for (const said of ["yes", "Yes.", "ok", "Jarvis, do it"]) {
+    const reply = await jarvis.handle(said);
+    assert.equal(reply.tool, undefined, said);
+    assert.match(reply.say, /nothing waiting/, said);
+  }
+});
+
+test("forgotten text is gone from the file itself", () => {
+  const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-memory-"));
+  const path = joinPath(dir, "memory.sqlite");
+  const memory = new Memory(path);
+  memory.remember("my secretword is xylophone");
+  memory.addTurn("user", "tell me about xylophone lessons");
+  memory.addTurn("jarvis", "xylophone lessons sound fun");
+  memory.remember("I like coffee");
+  assert.equal(memory.forget("xylophone"), 3);
+  memory.close();
+  for (const file of readdirSync(dir)) {
+    assert.doesNotMatch(readFileSync(joinPath(dir, file)).toString("latin1"), /xylophone/i, file);
+  }
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  const reopened = new Memory(path);
+  assert.deepEqual(reopened.facts(), ["I like coffee"]);
+  reopened.close();
+  rmSync(dir, { recursive: true });
 });

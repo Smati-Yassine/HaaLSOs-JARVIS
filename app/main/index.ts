@@ -1,11 +1,14 @@
 // The desktop app: one window holding Jarvis and, while coding, Claude, plus the voice engine.
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
 
 import { Jarvis, summarize, unloadModel, type Pending, type Reply } from "./brain.ts";
 import { ClaudeManager, type Permission } from "./claude.ts";
+import { Memory } from "./memory.ts";
 import { classify, isApproval } from "./safety.ts";
+import { healthCheck, setStartAtLogin, startsAtLogin } from "./system.ts";
 import { Voice, type VoiceEvent } from "./voice.ts";
 
 // Matches the app menu entry, so the dock groups this window under Jarvis's icon.
@@ -15,7 +18,16 @@ app.commandLine.appendSwitch("ozone-platform-hint", "auto");
 // Hides Chromium's harmless warnings about GNOME fonts and video hardware.
 app.commandLine.appendSwitch("log-level", "3");
 
-const jarvis = new Jarvis({ dryRun: process.env.JARVIS_DRY_RUN === "1" });
+// Only one Jarvis at a time: two would fight over the microphone.
+if (!app.requestSingleInstanceLock()) app.exit(0);
+app.on("second-instance", () => {
+  if (window?.isMinimized()) window.restore();
+  window?.show();
+  window?.focus();
+});
+
+const memory = new Memory(process.env.JARVIS_MEMORY || join(homedir(), ".Jarvis", "memory.sqlite"));
+const jarvis = new Jarvis({ dryRun: process.env.JARVIS_DRY_RUN === "1" }, memory);
 let window: BrowserWindow | null = null;
 let voice: Voice | null = null;
 
@@ -108,8 +120,22 @@ async function handleSaid(said: string): Promise<Reply> {
   return answerPermission(said) ?? (await jarvis.handle(said));
 }
 
+// The voice engine comes back by itself if it crashes, but won't loop forever if it's broken.
+let voiceCrashes = 0;
+let quitting = false;
+function restartVoice() {
+  if (quitting || voiceCrashes >= 3) return;
+  voiceCrashes += 1;
+  setTimeout(() => {
+    if (quitting) return;
+    if (voice?.start()) toWindow({ type: "voice-restarting" });
+  }, 2000);
+}
+
 async function onVoiceEvent(event: VoiceEvent) {
   if (event.type === "follow_up") return voice?.listen();
+  if (event.type === "ready") setTimeout(() => (voiceCrashes = 0), 60_000).unref();
+  if (event.type === "gone") restartVoice();
   if (event.type !== "heard") return toWindow(event);
   const said = event.text.trim();
   if (!said) return toWindow({ type: "heard", text: "" });
@@ -148,6 +174,10 @@ function createWindow() {
     window = null;
     app.quit();
   });
+  // If the page itself ever crashes, bring it back rather than leaving a blank window.
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (details.reason !== "clean-exit") window?.webContents.reload();
+  });
 
   if (process.env.ELECTRON_RENDERER_URL) window.loadURL(`${process.env.ELECTRON_RENDERER_URL}/jarvis-window/index.html`);
   else window.loadFile(join(__dirname, "../renderer/jarvis-window/index.html"));
@@ -166,6 +196,9 @@ ipcMain.handle("voice:available", () => voice !== null);
 ipcMain.handle("theme:set", (_event, mode: unknown) => {
   nativeTheme.themeSource = mode === "light" ? "light" : "dark";
 });
+ipcMain.handle("jarvis:health", () => healthCheck(join(app.getAppPath(), "..", "voice")));
+ipcMain.handle("autostart:get", () => startsAtLogin());
+ipcMain.handle("autostart:set", (_event, enabled: unknown) => setStartAtLogin(Boolean(enabled)));
 ipcMain.on("window:minimize", () => window?.minimize());
 ipcMain.on("window:toggle-maximize", () => (window?.isMaximized() ? window.unmaximize() : window?.maximize()));
 ipcMain.on("window:close", () => window?.close());
@@ -204,6 +237,7 @@ app.whenReady().then(() => {
 // Stop the microphone, end Claude's terminals, and free the graphics card when Jarvis closes.
 let unloading = false;
 app.on("before-quit", (event) => {
+  quitting = true;
   voice?.quit();
   claude.stop();
   if (unloading) return;
