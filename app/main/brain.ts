@@ -5,8 +5,9 @@ import { join } from "node:path";
 
 import { clean, fastPath, type Call } from "./fastpath.ts";
 import { meaningfulWords, Memory, memoryCommand } from "./memory.ts";
+import { listProjects, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, type Level } from "./safety.ts";
-import { runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
+import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
 const OLLAMA = "http://localhost:11434/api/chat";
 const MODEL = "qwen3.5:2b";
@@ -16,15 +17,26 @@ const LOG_DAYS = 30;
 const KEEP_TURNS = 6;
 
 const SYSTEM = `You are Jarvis, the user's personal assistant on his Linux computer. Address him as sir. \
-Keep spoken replies to one or two short sentences, with no emoji. Use a tool whenever the request is an action on the \
-computer or needs live information. Answer directly, without tools, for jokes, general knowledge, thanks \
-and conversation. Never search for facts you already know. Never offer to do something or ask a follow-up question, just answer or say you can't. You have no live information except through tools: if no tool fits, say you can't check that, and never guess. Only use get_time when he asks the time or date. Only use google_search when he explicitly says \
-google or search. Any request to add, fix, change or build something in code goes to ask_claude. A website \
-or web address goes to open_website. Shell commands run from his home folder, so use paths like ~/Downloads.`;
+Keep spoken replies to one or two short sentences, with no emoji. Use a tool whenever the request is an action \
+on the computer or needs live information. Answer directly, without tools, for jokes, general knowledge, thanks \
+and conversation. Never offer to do something or ask a follow-up question, just answer or say you can't. You \
+have no live information except through tools, so never guess current facts. Only use get_time when he asks the \
+time or date. Only use google_search when he says the word google. For news, scores, prices, recent events or \
+anything that may have changed, use web_answer. Any request to add, fix, change or build something in code goes \
+to ask_claude. A website or web address goes to open_website. Shell commands run from his home folder, so use \
+paths like ~/Downloads.`;
 
 type Message = { role: string; content: string };
 export type Pending = { command: string; level: Level };
-export type Reply = { say: string; source: "fast" | "model" | "tool"; tool?: string; pending?: Pending; ms: number };
+export type Reply = {
+  say: string;
+  source: "fast" | "model" | "tool";
+  tool?: string;
+  pending?: Pending;
+  // Jarvis asked something, so the microphone should open without the wake word.
+  listen?: boolean;
+  ms: number;
+};
 
 function log(entry: Record<string, unknown>) {
   mkdirSync(logDir(), { recursive: true });
@@ -75,8 +87,9 @@ export function parseTextCall(content: string): Call | null {
 
 // The model sometimes picks one of these for no reason, so these actions need matching words.
 const NEEDS_WORDS: Record<string, RegExp> = {
-  google_search: /\b(google|search|look\s*up|find)\b/i,
+  google_search: /\bgoogle\b/i,
   get_time: /\b(time|date|day|clock|today|tonight)\b/i,
+  window_control: /\b(windows?|minimi[sz]e|maximi[sz]e|unmaximi[sz]e|focus|restore|shrink|front|switch to)\b/i,
 };
 export const toolFitsWords = (tool: string, said: string) => NEEDS_WORDS[tool]?.test(said) ?? true;
 
@@ -151,10 +164,20 @@ export class Jarvis {
   private pending: Pending | null = null;
   private ctx: Context;
   private memory: Memory | null;
+  private lastProject: string | null = null;
+  private awaitingProject = false;
 
   constructor(ctx: Context = { dryRun: false }, memory: Memory | null = null) {
     this.ctx = ctx;
     this.memory = memory;
+  }
+
+  private projectNames(): string[] {
+    try {
+      return this.ctx.projects?.() ?? listProjects();
+    } catch {
+      return [];
+    }
   }
 
   connectClaude(claude: NonNullable<Context["claude"]>) {
@@ -176,6 +199,8 @@ export class Jarvis {
     if (call.tool === "run_command" && this.ctx.claude?.openProject) call = { tool: "ask_claude", args: {} };
     // Claude gets the user's exact words, never the small model's rewrite of them.
     if (call.tool === "ask_claude") call = { ...call, args: { task: said } };
+    // Search for what was actually asked, not the model's rewrite of it.
+    if (call.tool === "web_answer") call = { ...call, args: { question: clean(said) } };
     const tool = TOOLS[call.tool];
     if (!tool) return this.finish(said, "I'm not able to do that, sir.", source, begin);
     log({ said, tool: call.tool, args: call.args, source, dryRun: this.ctx.dryRun });
@@ -244,8 +269,35 @@ export class Jarvis {
       }
     }
 
+    const projects = this.projectNames();
+    const mentioned = projectInSentence(clean(said), projects);
+    if (mentioned) this.lastProject = mentioned;
+
+    // "Which project, sir?" was just asked, so a bare name answers it.
+    if (this.awaitingProject) {
+      this.awaitingProject = false;
+      if (mentioned) return this.runTool({ tool: "start_coding", args: { project: mentioned } }, "fast", said, begin);
+    }
+    const intent = projectIntent(clean(said), projects, this.lastProject);
+    if (intent && "project" in intent) {
+      this.lastProject = intent.project;
+      return this.runTool({ tool: "start_coding", args: { project: intent.project } }, "fast", said, begin);
+    }
+    if (intent) {
+      if (this.ctx.claude?.openProject) {
+        return this.finish(said, `${this.ctx.claude.openProject} is already open, sir.`, "fast", begin);
+      }
+      this.awaitingProject = true;
+      const reply = this.finish(said, `Which project, sir? You have ${projects.join(", ")}.`, "fast", begin);
+      return { ...reply, listen: true };
+    }
+
     const quick = fastPath(said);
-    if (quick) return this.runTool(quick, "fast", said, begin);
+    // "Start working with it" isn't an app. Only a program that really exists opens directly.
+    if (quick && !(quick.tool === "open_app" && !this.ctx.dryRun && !findApp(quick.args.name))) {
+      return this.runTool(quick, "fast", said, begin);
+    }
+    if (quick && /^(open|launch)\b/i.test(clean(said))) return this.runTool(quick, "fast", said, begin);
 
     try {
       const notes = this.memory?.relevant(said) ?? [];

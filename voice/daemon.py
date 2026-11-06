@@ -35,7 +35,7 @@ MAX_COMMAND = 15.0
 ECHO_SETTLE = 0.25  # Seconds to ignore after Jarvis stops, while his voice fades from the mic.
 PRE_ROLL = 0.8  # Voice detection reacts late, so keep what came just before it.
 
-COMMON = ["Yes, sir?", "Right away, sir.", "Done, sir.", "Cancelled, sir."]
+COMMON = ["Yes, sir?", "Right away, sir.", "Done, sir.", "Cancelled, sir.", "Let me check, sir."]
 
 
 def emit(kind, **fields):

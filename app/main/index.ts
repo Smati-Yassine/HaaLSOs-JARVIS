@@ -10,6 +10,7 @@ import { Memory } from "./memory.ts";
 import { classify, isApproval } from "./safety.ts";
 import { healthCheck, setStartAtLogin, startsAtLogin } from "./system.ts";
 import { Voice, type VoiceEvent } from "./voice.ts";
+import { startSearch, stopSearch } from "./web.ts";
 
 // Matches the app menu entry, so the dock groups this window under Jarvis's icon.
 app.setName("jarvis");
@@ -27,7 +28,10 @@ app.on("second-instance", () => {
 });
 
 const memory = new Memory(process.env.JARVIS_MEMORY || join(homedir(), ".Jarvis", "memory.sqlite"));
-const jarvis = new Jarvis({ dryRun: process.env.JARVIS_DRY_RUN === "1" }, memory);
+const jarvis = new Jarvis({
+  dryRun: process.env.JARVIS_DRY_RUN === "1",
+  ack: (words) => voice?.say(words), // Searching takes seconds, so Jarvis says so first.
+}, memory);
 let window: BrowserWindow | null = null;
 let voice: Voice | null = null;
 
@@ -113,7 +117,7 @@ function closeClaude() {
 }
 
 function speakReply(reply: Reply) {
-  voice?.say(reply.say, Boolean(reply.pending));
+  voice?.say(reply.say, Boolean(reply.pending || reply.listen));
 }
 
 async function handleSaid(said: string): Promise<Reply> {
@@ -223,6 +227,7 @@ ipcMain.on("claude:close-project", () => {
 
 app.whenReady().then(() => {
   pruneLog();
+  void startSearch();
   Menu.setApplicationMenu(null);
   // No permissions for the page: the microphone belongs to the voice engine, never the browser.
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -239,6 +244,7 @@ app.whenReady().then(() => {
 let unloading = false;
 app.on("before-quit", (event) => {
   quitting = true;
+  stopSearch();
   voice?.quit();
   claude.stop();
   if (unloading) return;

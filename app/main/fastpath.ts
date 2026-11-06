@@ -41,7 +41,7 @@ export function fastPath(said: string): Call | null {
   if (/\b(list|show|what are|which are|name)\b.*\bprojects\b/.test(lower)) return { tool: "list_projects", args: {} };
 
   // Saying "google" always means Brave, even for the weather.
-  const wantsSearch = /^(google|search|look up)\b/.test(lower);
+  const wantsSearch = /^google\b/.test(lower);
   if (!wantsSearch && /\b(weather|forecast|temperature)\b/.test(lower) && !/\b(code|project|app|page|api|component|add|fix|build)\b/.test(lower)) {
     const place = text.match(/\b(?:in|for|at)\s+([\p{L}][\p{L} '-]*?)(?:\s+(?:today|tomorrow|right now|now))?$/iu)?.[1];
     const args: Record<string, string> = /\btomorrow\b/.test(lower) ? { when: "tomorrow" } : {};
@@ -60,8 +60,15 @@ export function fastPath(said: string): Call | null {
   if (/^(next|skip)( the)?( song| track| video)?$/.test(lower)) return { tool: "media_control", args: { action: "next" } };
   if (/^(previous|last)( song| track| video)$/.test(lower)) return { tool: "media_control", args: { action: "previous" } };
 
-  if ((match = text.match(/^(?:google|search google for|search for|look up)\s+(.+)$/i))) {
+  // The word "google" means Brave. Asking anything else about the web gets a spoken answer.
+  if ((match = text.match(/^(?:google|search google for|google search for)\s+(.+)$/i))) {
     return { tool: "google_search", args: { query: match[1] } };
+  }
+  if ((match = text.match(/^(?:search for|search|look up|find out)\s+(.+)$/i))) {
+    return { tool: "web_answer", args: { question: match[1] } };
+  }
+  if (/\b(news|headlines|who won|score|scores|stock price|price of|exchange rate|latest)\b/.test(lower) && !/\b(code|project|app|page|api|component|add|fix|build|file|test)\b/.test(lower)) {
+    return { tool: "web_answer", args: { question: text } };
   }
 
   if ((match = text.match(/^(?:go to|open|visit)\s+(\S+)$/i)) && WEBSITE.test(match[1])) {
@@ -87,5 +94,6 @@ export function fastPath(said: string): Call | null {
     return { tool: "system_info", args: { what: "battery" } };
   }
   if (/\b(disk|storage)\b/.test(lower) && /^(how|what|check)/.test(lower)) return { tool: "system_info", args: { what: "disk" } };
+  if (/\b(internet|online|wi-?fi|network)\b/.test(lower) && /^(am i|are we|is|do i|check|what)/.test(lower)) return { tool: "system_info", args: { what: "network" } };
   return null;
 }

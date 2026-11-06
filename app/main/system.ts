@@ -27,6 +27,7 @@ export async function healthCheck(voiceFolder: string): Promise<string[]> {
     join(HOME, "models", "openwakeword", "hey_jarvis_v0.1.onnx"),
   ];
   if (!voice.every(existsSync)) problems.push("some voice files are missing, so I can't listen or speak");
+  await run("docker", ["image", "inspect", "searxng/searxng:latest"]).catch(() => problems.push("my web search isn't set up, so I can't read web answers aloud"));
   await run("bash", ["-lc", "command -v claude"]).catch(() => problems.push("I can't find Claude Code, so coding won't work"));
   await listWindows().catch(() => problems.push("the Window Control extension isn't active, so I can't minimize or maximize windows"));
   if (!existsSync(PROJECTS_ROOT)) problems.push(`I can't find your projects folder at ${PROJECTS_ROOT}`);

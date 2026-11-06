@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { findProject, listProjects, PROJECTS_ROOT } from "./projects.ts";
 import { classify, type Level } from "./safety.ts";
+import { webAnswer } from "./web.ts";
 import { controlWindow, knownAction, listWindows, NOT_INSTALLED, pickWindow } from "./windows.ts";
 
 const run = promisify(execFile);
@@ -26,7 +27,12 @@ export type ClaudeControl = {
   ask(task: string): boolean;
   close(): void;
 };
-export type Context = { dryRun: boolean; claude?: ClaudeControl };
+export type Context = {
+  dryRun: boolean;
+  claude?: ClaudeControl;
+  ack?: (words: string) => void;
+  projects?: () => string[];
+};
 
 const text = (value: unknown) => String(value ?? "").trim();
 
@@ -213,6 +219,22 @@ async function getWeather(args: Args, ctx: Context): Promise<Result> {
   }
 }
 
+// ---- Web answers ------------------------------------------------------------
+
+async function askWeb(args: Args, ctx: Context): Promise<Result> {
+  const question = text(args.question);
+  if (!question) return { ok: false, say: "What should I look up, sir?" };
+  if (ctx.dryRun) return { ok: true, say: `Looking up ${question}, sir.` };
+  ctx.ack?.("Let me check, sir.");
+  try {
+    const answer = await webAnswer(question, "qwen3.5:2b");
+    if (answer === null) return { ok: false, say: "My web search isn't responding, sir." };
+    return { ok: true, say: answer || `I couldn't find anything on that, sir.` };
+  } catch {
+    return { ok: false, say: "My web search isn't running right now, sir. Say google if you want it in Brave." };
+  }
+}
+
 // ---- Sound and media --------------------------------------------------------
 
 const SINK = "@DEFAULT_AUDIO_SINK@";
@@ -338,6 +360,11 @@ export const TOOLS: Record<string, Tool> = {
     params: { location: "City name, or empty for home", when: "today or tomorrow" },
     run: getWeather,
   },
+  web_answer: {
+    description: "Look up something on the internet and read the answer aloud: news, scores, prices, recent events, or anything that may have changed.",
+    params: { question: "What to find out" },
+    run: askWeb,
+  },
   open_app: {
     description: "Open a program on the computer.",
     params: { name: "Program name, like firefox or spotify" },
@@ -350,7 +377,7 @@ export const TOOLS: Record<string, Tool> = {
     run: windowControl,
   },
   google_search: {
-    description: "Search Google in a new Brave browser tab.",
+    description: "Open a Google search in Brave. Only when he says the word google.",
     params: { query: "What to search for" },
     run: googleSearch,
   },
