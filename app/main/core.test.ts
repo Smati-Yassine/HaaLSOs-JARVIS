@@ -56,6 +56,10 @@ test("a casual yes doesn't approve a dangerous command", () => {
   assert.equal(isApproval("Do it.", "confirm"), true);
   assert.equal(isApproval("yes do it", "confirm"), true);
   assert.equal(isApproval("no", "say-back"), false);
+  assert.equal(isApproval("Yes, sir.", "say-back"), true);
+  assert.equal(isApproval("Yes sir", "say-back"), true);
+  assert.equal(isApproval("Yes, sir.", "confirm"), false);
+  assert.equal(isApproval("Confirm, sir.", "confirm"), true);
   assert.equal(isApproval("what time is it", "say-back"), false);
 });
 

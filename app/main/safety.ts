@@ -30,7 +30,8 @@ export function classify(command: string): Level {
 
 // A clear yes is required for dangerous commands; "yes" alone is enough for the rest.
 export function isApproval(answer: string, level: Level): boolean {
-  const text = answer.trim().toLowerCase().replace(/[.!]+$/, "");
+  // "Yes, sir." is the most natural way to say yes to Jarvis.
+  const text = answer.trim().toLowerCase().replace(/[.!]+$/, "").replace(/,? sir$/, "");
   if (level === "confirm") return /^(yes,? )?(confirm|do it|proceed)( it)?$/.test(text);
   return /^(yes|yeah|yep|ok|okay|sure|go ahead|do it|confirm|proceed)$/.test(text);
 }
