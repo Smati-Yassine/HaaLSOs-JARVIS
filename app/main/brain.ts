@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { claudeAction, clean, fastPath, looksLikeCoding, splitCommands, type Call } from "./fastpath.ts";
 import { lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
-import { listProjects, projectInSentence, projectIntent } from "./projects.ts";
+import { claudeShortcut, listProjects, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
 import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
@@ -549,6 +549,22 @@ Rewritten:`);
         if (task && this.ctx.claude?.openProject) this.ctx.claude.ask(task);
         return task ? { ...reply, say: `${reply.say} I'll pass your request along.` } : reply;
       }
+    }
+
+    const shortcut = this.ctx.claude ? claudeShortcut(clean(said), projects) : null;
+    if (shortcut && "project" in shortcut) {
+      this.lastProject = shortcut.project;
+      return this.runTool({ tool: "start_coding", args: { project: shortcut.project } }, "fast", said, begin);
+    }
+    if (shortcut) {
+      const claude = this.ctx.claude!;
+      // Claude is already open somewhere, so just bring it back into view.
+      if (claude.openProject) {
+        claude.setVisible?.(true);
+        return this.finish(said, `Here's Claude, sir, in ${claude.openProject === "Computer" ? "your home folder" : claude.openProject}.`, "fast", begin, "claude_control");
+      }
+      if (!this.ctx.dryRun) claude.start("Computer", homedir());
+      return this.finish(said, "Opening Claude in your home folder, sir.", "fast", begin, "start_coding");
     }
 
     // A question about one of his projects is about that project, not the web.

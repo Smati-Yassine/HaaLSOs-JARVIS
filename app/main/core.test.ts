@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
@@ -10,7 +10,7 @@ import { isStatementAboutSelf, Jarvis, looksLikeFollowUp, parseTextCall, pruneLo
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { readMenu, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
-import { findProject, projectInSentence, projectIntent } from "./projects.ts";
+import { claudeShortcut, findProject, projectInSentence, projectIntent } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
 import { spokenForm } from "./voice.ts";
@@ -718,4 +718,35 @@ test("news about himself isn't taken as a command, but a request still is", () =
 test("a question about his own schedule isn't a question about the clock", () => {
   assert.ok(!toolFitsWords("get_time", "what time do I wake up"));
   assert.ok(toolFitsWords("get_time", "could you tell me what time it is"));
+});
+
+test("claude alone means the home folder, and claude with a name means that project", () => {
+  const names = ["luminelle", "tempura", "HaaLSO's JARVIS"];
+  for (const said of ["claude", "Claude", "open claude", "start claude code", "claude home", "claude ~", "claude in my home folder"]) assert.deepEqual(claudeShortcut(said, names), { home: true }, said);
+  for (const said of ["claude luminelle", "Claude Luminelle", "open claude in luminelle", "claude on luminal", "claude code luminelle"]) assert.deepEqual(claudeShortcut(said, names), { project: "luminelle" }, said);
+  assert.deepEqual(claudeShortcut("claude jarvis", names), { project: "HaaLSO's JARVIS" });
+  for (const said of ["claude is great", "ask claude to fix the login page", "what is claude", "claude please fix the navbar on the home page"]) assert.equal(claudeShortcut(said, names), null, said);
+});
+
+test("typing claude opens the home folder, or shows Claude if it's already open", async () => {
+  const started: string[][] = [];
+  let shown = 0;
+  const claude = {
+    openProject: null as string | null,
+    start(project: string, path: string) {
+      started.push([project, path]);
+      claude.openProject = project;
+    },
+    ask: () => true,
+    close() {},
+    setVisible() {
+      shown += 1;
+    },
+  };
+  const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"] });
+  assert.equal((await jarvis.handle("claude")).say, "Opening Claude in your home folder, sir.");
+  assert.deepEqual(started, [["Computer", homedir()]]);
+  assert.equal((await jarvis.handle("open claude")).say, "Here's Claude, sir, in your home folder.");
+  assert.equal(shown, 1);
+  assert.equal(started.length, 1);
 });

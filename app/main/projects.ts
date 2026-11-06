@@ -88,3 +88,14 @@ export function projectIntent(said: string, names: string[], last: string | null
   if (NO_NAME.test(said)) return { ask: true };
   return null;
 }
+
+// "claude" opens Claude in the home folder, and "claude luminelle" opens that project. Anything
+// else after the word isn't a shortcut: "claude is great" is just a sentence.
+export function claudeShortcut(said: string, names: string[]): { home: true } | { project: string } | null {
+  const match = said.match(/^(?:(?:open|start|launch|run)\s+)?claude(?:\s+code)?(?:\s+(?:(?:in|on|for|at|with)\s+)?(.+))?$/i);
+  if (!match) return null;
+  const rest = match[1]?.trim();
+  if (!rest || /^(~|home|(my |the )?home folder)$/i.test(rest)) return { home: true };
+  const project = rest.split(/\s+/).length <= 4 ? findProject(rest, names) : null;
+  return project ? { project } : null;
+}
