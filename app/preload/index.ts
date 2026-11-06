@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("jarvis", {
   deleteChat: (id: number) => ipcRenderer.invoke("chats:delete", id),
   listFacts: () => ipcRenderer.invoke("facts:list"),
   deleteFact: (id: number) => ipcRenderer.invoke("facts:delete", id),
+  reminders: () => ipcRenderer.invoke("reminders:list"),
+  deleteReminder: (id: number) => ipcRenderer.invoke("reminders:delete", id),
   warmUp: () => ipcRenderer.invoke("jarvis:warm-up"),
   welcome: (text: string) => ipcRenderer.invoke("jarvis:welcome", text),
   setTheme: (mode: "dark" | "light") => ipcRenderer.invoke("theme:set", mode),

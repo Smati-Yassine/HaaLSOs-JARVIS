@@ -96,6 +96,16 @@ export class Memory {
     return rows.map((row) => ({ kind: String(row.kind), text: String(row.text), due: Number(row.due) }));
   }
 
+  // The same list with ids, so the window can show each one and cancel just that one.
+  upcomingReminders(): (Reminder & { id: number })[] {
+    const rows = this.db.prepare("SELECT id, kind, text, due FROM reminders ORDER BY due").all() as Row[];
+    return rows.map((row) => ({ id: Number(row.id), kind: String(row.kind), text: String(row.text), due: Number(row.due) }));
+  }
+
+  deleteReminder(id: number) {
+    this.db.prepare("DELETE FROM reminders WHERE id = ?").run(id);
+  }
+
   clearReminders(): number {
     return Number(this.db.prepare("DELETE FROM reminders").run().changes);
   }

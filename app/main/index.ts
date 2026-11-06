@@ -375,6 +375,8 @@ ipcMain.handle("chats:new", () => jarvis.startChat());
 ipcMain.handle("chats:delete", (_event, id: unknown) => jarvis.deleteChat(Number(id)));
 ipcMain.handle("facts:list", () => memory.allFacts());
 ipcMain.handle("facts:delete", (_event, id: unknown) => jarvis.forgetFact(Number(id)));
+ipcMain.handle("reminders:list", () => memory.upcomingReminders());
+ipcMain.handle("reminders:delete", (_event, id: unknown) => memory.deleteReminder(Number(id)));
 ipcMain.handle("jarvis:warm-up", () => jarvis.warmUp().then(() => true, () => false));
 ipcMain.handle("jarvis:welcome", (_event, text: unknown) => voice?.say(String(text)));
 ipcMain.handle("voice:mute", (_event, muted: unknown) => voice?.setMuted(Boolean(muted)));

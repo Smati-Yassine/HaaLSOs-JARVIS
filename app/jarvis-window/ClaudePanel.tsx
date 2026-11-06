@@ -1,9 +1,12 @@
-// The Claude side of the app: sessions, real terminals and the status bar.
+// Claude's side of the line: real terminals and the status bar below it, and the strands that
+// stand in for the session list on it.
 import "@xterm/xterm/css/xterm.css";
 
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
+
+import type { LineEngine, StrandItem } from "./Line";
 
 type Session = {
   id: string;
@@ -72,8 +75,10 @@ const terminals = new Map<string, Live>();
 function refit(id: string) {
   const live = terminals.get(id);
   if (!live || live.host.offsetParent === null) return;
+  const { cols, rows } = live.term;
   live.fit.fit();
-  window.claude.resize(id, live.term.cols, live.term.rows);
+  // Claude redraws its whole screen on a resize, so only tell it about real ones.
+  if (live.term.cols !== cols || live.term.rows !== rows) window.claude.resize(id, live.term.cols, live.term.rows);
 }
 
 function attach(id: string, parent: HTMLElement) {
@@ -96,6 +101,8 @@ function attach(id: string, parent: HTMLElement) {
   term.onData((data) => window.claude.write(id, data));
   const live: Live = { term, fit, host, early: [] };
   terminals.set(id, live);
+  fit.fit();
+  window.claude.resize(id, term.cols, term.rows);
   // The saved screen already includes anything sent before this point.
   window.claude.buffer(id).then((text) => {
     if (text) term.write(text);
@@ -121,8 +128,7 @@ function Meter({ label, value, warm, hint }: { label: string; value: number | nu
   );
 }
 
-export function ClaudePanel({ snap, mode, asking, onMinimize }: { snap: Snapshot; mode: "dark" | "light"; asking: boolean; onMinimize(): void }) {
-  const [showArchived, setShowArchived] = useState(false);
+export function ClaudePanel({ snap, mode, asking }: { snap: Snapshot; mode: "dark" | "light"; asking: boolean }) {
   const area = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -171,89 +177,26 @@ export function ClaudePanel({ snap, mode, asking, onMinimize }: { snap: Snapshot
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveIds, snap.active]);
 
+  // The room changes on every frame while the line moves, so only refit once it has settled.
   useEffect(() => {
     const parent = area.current;
     if (!parent) return;
-    const observer = new ResizeObserver(() => snap.active && refit(snap.active));
+    let timer = 0;
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => snap.active && refit(snap.active), 140);
+    });
     observer.observe(parent);
-    return () => observer.disconnect();
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+    };
   }, [snap.active]);
-
-  const claudes = snap.sessions.filter((session) => session.kind === "claude" && session.state !== "archived");
-  const shells = snap.sessions.filter((session) => session.kind === "shell");
-  const archived = snap.sessions.filter((session) => session.state === "archived");
 
   return (
     <section className="claude-panel" aria-label="Claude">
-      <header className="panel-bar">
-        <b>Claude</b>
-        <span className="sep">/</span>
-        <span className="project">{snap.project}</span>
-        <span className="path">{snap.path}</span>
-        <button className="win" type="button" aria-label="Hide Claude" title="Hide Claude" onClick={onMinimize}>&minus;</button>
-        <button className="win close" type="button" onClick={() => window.claude.closeProject()}>Close project</button>
-      </header>
-      <div className="work">
-        <nav className="side" aria-label="Sessions and terminals">
-          <div className="side-title">
-            Claude sessions
-            <span className="side-actions">
-              <button
-                type="button"
-                className="archive-button"
-                aria-label={`${showArchived ? "Hide" : "Show"} archived sessions (${archived.length})`}
-                title={`${showArchived ? "Hide" : "Show"} archived (${archived.length})`}
-                aria-pressed={showArchived}
-                onClick={() => setShowArchived((value) => !value)}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1" /><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4" /></svg>
-                {archived.length > 0 && <small>{archived.length}</small>}
-              </button>
-              <button type="button" aria-label="New Claude session" title="New Claude session" onClick={() => window.claude.newSession()}>+</button>
-            </span>
-          </div>
-          {showArchived && (
-            <div className="archived-list">
-              {archived.length === 0 && <p>Nothing archived.</p>}
-              {archived.map((session) => (
-                <div key={session.id} className="archived">
-                  <span title={session.title}>{session.title}</span>
-                  <button type="button" onClick={() => window.claude.restore(session.id)}>Restore</button>
-                </div>
-              ))}
-            </div>
-          )}
-          {claudes.map((session) => (
-            <div key={session.id} className={`row ${session.id === snap.active ? "on" : ""}`}>
-              <button
-                type="button"
-                className="row-main"
-                disabled={session.elsewhere}
-                title={session.elsewhere ? "Open in VS Code or another terminal. Close it there to continue it here." : session.title}
-                onClick={() => window.claude.select(session.id)}
-              >
-                <span className={`dot ${session.working ? "working" : session.state}`} />
-                <span className="name">{session.title}</span>
-                {session.elsewhere && <span className="pct">open elsewhere</span>}
-                {session.context !== null && <span className="pct">{percent(session.context)}</span>}
-              </button>
-              <button type="button" className="row-x" aria-label={`Archive ${session.title}`} onClick={() => window.claude.archive(session.id)}>×</button>
-            </div>
-          ))}
-          <div className="side-title">Terminals<button type="button" aria-label="New terminal" onClick={() => window.claude.newTerminal()}>+</button></div>
-          {shells.map((session) => (
-            <div key={session.id} className={`row ${session.id === snap.active ? "on" : ""}`}>
-              <button type="button" className="row-main" onClick={() => window.claude.select(session.id)}>
-                <span className="glyph">&gt;</span>
-                <span className="name">{session.title}</span>
-              </button>
-              <button type="button" className="row-x" aria-label={`Close ${session.title}`} onClick={() => window.claude.archive(session.id)}>×</button>
-            </div>
-          ))}
-        </nav>
-        <div className="terminals" ref={area}>
-          {!snap.active && <p className="empty">Nothing is open. Use + to start a Claude session or a terminal.</p>}
-        </div>
+      <div className="terminals" ref={area}>
+        {!snap.active && <p className="empty">Nothing is open. Use + on the line to start a Claude session or a terminal.</p>}
       </div>
       <footer className="status">
         {active?.kind === "claude" ? (
@@ -284,10 +227,125 @@ export function ClaudePanel({ snap, mode, asking, onMinimize }: { snap: Snapshot
         <span className="plan">
           <Meter label="5-hour" value={snap.plan.fiveHour} hint={until(snap.plan.fiveHourResets)} />
           <Meter label="Weekly" value={snap.plan.week} warm hint={until(snap.plan.weekResets)} />
+          <button type="button" className="leave" onClick={() => window.claude.closeProject()}>Close project</button>
         </span>
       </footer>
     </section>
   );
 }
 
+// How many strands fit beside the message box. The rest wait in the + menu.
+function useRoom() {
+  const [width, setWidth] = useState(innerWidth);
+  useEffect(() => {
+    const onResize = () => setWidth(innerWidth);
+    addEventListener("resize", onResize);
+    return () => removeEventListener("resize", onResize);
+  }, []);
+  if (width < 760) return { claudes: Math.max(1, Math.floor((width * 0.62) / 120)), shells: 1 };
+  const side = (width - Math.min(600, width * 0.44)) / 2;
+  return { claudes: Math.max(1, Math.floor((side - 32) / 120)), shells: Math.max(1, Math.floor((side - 58) / 90)) };
+}
 
+function fitted(list: Session[], max: number, active: string | null) {
+  if (list.length <= max) return list;
+  const shown = list.slice(0, max);
+  const current = list.find((session) => session.id === active);
+  if (current && !shown.includes(current)) shown[max - 1] = current;
+  return shown;
+}
+
+export function ClaudeBand({ snap, engine, asking }: { snap: Snapshot; engine: LineEngine; asking: boolean }) {
+  const [menu, setMenu] = useState(false);
+  const [moved, setMoved] = useState(engine.moved);
+  const room = useRoom();
+
+  useEffect(() => {
+    engine.onMoved = () => setMoved(true);
+    return () => {
+      engine.onMoved = null;
+    };
+  }, [engine]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [menu]);
+
+  const open = snap.sessions.filter((session) => session.state === "running");
+  const claudes = fitted(open.filter((session) => session.kind === "claude"), room.claudes, snap.active);
+  const shells = fitted(open.filter((session) => session.kind === "shell"), room.shells, snap.active);
+  const onLine = [...claudes, ...shells];
+  const waiting = snap.sessions.filter((session) => session.state !== "archived" && !onLine.includes(session));
+  const archived = snap.sessions.filter((session) => session.state === "archived");
+
+  // Claude's question belongs to the session that's busy, or else the one in front of you.
+  const askingId = asking ? (snap.sessions.find((session) => session.working)?.id ?? snap.active) : null;
+  const signature = onLine.map((session) => `${session.id}:${session.id === snap.active}:${session.working}:${session.id === askingId}`).join();
+  useEffect(() => {
+    const items: StrandItem[] = onLine.map((session) => ({
+      id: session.id,
+      kind: session.kind,
+      active: session.id === snap.active,
+      working: session.working,
+      asking: session.id === askingId,
+      frac: 1,
+    }));
+    engine.sync("sessions", items);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engine, signature]);
+  useEffect(() => () => engine.sync("sessions", []), [engine]);
+
+  return (
+    <div className="band">
+      {onLine.map((session) => (
+        <div
+          key={session.id}
+          ref={(element) => engine.label(session.id, element)}
+          className={`label ${session.kind}${session.id === snap.active ? " on" : ""}${session.id === askingId ? " asking" : ""}`}
+        >
+          <button type="button" className="label-main" title={session.title} onClick={() => window.claude.select(session.id)}>{session.title}</button>
+          {session.context !== null && <span className="pct">{percent(session.context)}</span>}
+          <button type="button" className="label-x" aria-label={`${session.kind === "claude" ? "Archive" : "Close"} ${session.title}`} onClick={() => window.claude.archive(session.id)}>×</button>
+        </div>
+      ))}
+      <div className="where"><b>{snap.project}</b>{moved ? snap.path : "drag the line to make room"}</div>
+      <button
+        type="button"
+        className="band-add"
+        aria-label="Sessions and terminals"
+        title="Sessions and terminals"
+        aria-expanded={menu}
+        onClick={(event) => {
+          event.stopPropagation();
+          setMenu((value) => !value);
+        }}
+      >
+        +
+      </button>
+      {menu && (
+        <div className="band-menu" onClick={(event) => event.stopPropagation()}>
+          <button type="button" onClick={() => { setMenu(false); window.claude.newSession(); }}>New Claude session</button>
+          <button type="button" onClick={() => { setMenu(false); window.claude.newTerminal(); }}>New terminal</button>
+          {waiting.length > 0 && <small>Sessions</small>}
+          {waiting.map((session) => (
+            <div key={session.id} className="menu-row">
+              <span title={session.elsewhere ? "Open in VS Code or another terminal. Close it there to continue it here." : session.title}>{session.title}</span>
+              {session.elsewhere ? <em>open elsewhere</em> : <button type="button" onClick={() => { setMenu(false); window.claude.select(session.id); }}>Open</button>}
+            </div>
+          ))}
+          <small>Archived</small>
+          {archived.length === 0 && <div className="menu-row">Nothing archived.</div>}
+          {archived.map((session) => (
+            <div key={session.id} className="menu-row">
+              <span title={session.title}>{session.title}</span>
+              <button type="button" onClick={() => window.claude.restore(session.id)}>Restore</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
