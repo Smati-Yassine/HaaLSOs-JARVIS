@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
-import { Jarvis, parseTextCall, speakable } from "./brain.ts";
+import { Jarvis, parseTextCall, pruneLog, scrubLog, speakable } from "./brain.ts";
 import { fastPath } from "./fastpath.ts";
 import { containsSecret, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { findProject } from "./projects.ts";
@@ -239,5 +239,31 @@ test("forgotten text is gone from the file itself", () => {
   const reopened = new Memory(path);
   assert.deepEqual(reopened.facts(), ["I like coffee"]);
   reopened.close();
+  rmSync(dir, { recursive: true });
+});
+
+test("forget that also removes the line that created the fact", () => {
+  const memory = new Memory(":memory:");
+  memory.addTurn("user", "remember that my locker code is purple");
+  memoryCommand("remember that my locker code is purple", memory);
+  memoryCommand("forget that", memory);
+  assert.deepEqual(memory.facts(), []);
+  assert.deepEqual(memory.said(0, Date.now() + 1), []);
+});
+
+test("the command log forgets too, and deletes old entries", () => {
+  const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-log-"));
+  const path = joinPath(dir, "commands.jsonl");
+  const now = Date.parse("2026-11-06T12:00:00Z");
+  const line = (days: number, said: string) => JSON.stringify({ at: new Date(now - days * 86_400_000).toISOString(), said });
+  writeFileSync(path, [line(40, "old request"), line(29, "open firefox"), line(1, "google my dentist Ben Ali"), line(0, "ask my dentist")].join("\n") + "\n", { mode: 0o644 });
+  pruneLog(30, now, path);
+  assert.doesNotMatch(readFileSync(path, "utf8"), /old request/);
+  scrubLog(["dentist", "ben"], path);
+  const left = readFileSync(path, "utf8");
+  assert.doesNotMatch(left, /Ben Ali/);
+  assert.match(left, /open firefox/);
+  assert.match(left, /ask my dentist/);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
   rmSync(dir, { recursive: true });
 });

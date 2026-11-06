@@ -1,16 +1,18 @@
 // The Jarvis loop: try the fast path, otherwise ask the local model, then run one tool.
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { clean, fastPath, type Call } from "./fastpath.ts";
-import { Memory, memoryCommand } from "./memory.ts";
+import { meaningfulWords, Memory, memoryCommand } from "./memory.ts";
 import { isApproval, type Level } from "./safety.ts";
 import { runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
 const OLLAMA = "http://localhost:11434/api/chat";
 const MODEL = "qwen3.5:2b";
 const LOG_DIR = join(homedir(), ".Jarvis", "logs");
+const COMMAND_LOG = join(LOG_DIR, "commands.jsonl");
+const LOG_DAYS = 30;
 const KEEP_TURNS = 6;
 
 const SYSTEM = `You are Jarvis, the user's personal assistant on his Linux computer. Address him as sir. \
@@ -26,7 +28,32 @@ export type Reply = { say: string; source: "fast" | "model" | "tool"; tool?: str
 
 function log(entry: Record<string, unknown>) {
   mkdirSync(LOG_DIR, { recursive: true });
-  appendFileSync(join(LOG_DIR, "commands.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n");
+  appendFileSync(COMMAND_LOG, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n", { mode: 0o600 });
+}
+
+function rewriteLog(keep: (line: string) => boolean, path: string) {
+  if (!existsSync(path)) return;
+  const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+  const kept = lines.filter(keep);
+  if (kept.length !== lines.length) writeFileSync(path, kept.length ? `${kept.join("\n")}\n` : "");
+  chmodSync(path, 0o600);
+}
+
+// Removes log lines older than the limit. Runs each time Jarvis starts.
+export function pruneLog(days = LOG_DAYS, now = Date.now(), path = COMMAND_LOG) {
+  const oldest = now - days * 86_400_000;
+  rewriteLog((line) => {
+    try {
+      return Date.parse(JSON.parse(line).at) >= oldest;
+    } catch {
+      return false;
+    }
+  }, path);
+}
+
+// Removes log lines containing every one of these words, so "forget" reaches the log too.
+export function scrubLog(words: string[], path = COMMAND_LOG) {
+  if (words.length) rewriteLog((line) => !words.every((word) => line.toLowerCase().includes(word)), path);
 }
 
 // Small models sometimes print a tool call as text instead of calling it. Catch that,
@@ -193,11 +220,18 @@ export class Jarvis {
     }
 
     if (this.memory) {
-      const answer = memoryCommand(clean(said), this.memory);
+      const command = clean(said);
+      const isForget = /^forget\b/i.test(command);
+      // What "forget that" refers to has to be read before it's deleted.
+      const target = /^forget (that|it|the last thing)[.!]?$/i.test(command)
+        ? (this.memory.facts(1)[0] ?? "")
+        : command.replace(/^forget (about |that )?/i, "");
+      const answer = memoryCommand(command, this.memory);
       if (answer) {
+        if (isForget) scrubLog(meaningfulWords(target));
         const reply = { say: answer, source: "fast" as const, tool: "memory", ms: Date.now() - begin };
         // A forget request shouldn't write the thing being forgotten straight back in.
-        if (!/^forget\b/i.test(clean(said))) this.memory.addTurn("user", said);
+        if (!isForget) this.memory.addTurn("user", said);
         return reply;
       }
     }

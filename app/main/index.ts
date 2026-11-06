@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
 
-import { Jarvis, summarize, unloadModel, type Pending, type Reply } from "./brain.ts";
+import { Jarvis, pruneLog, summarize, unloadModel, type Pending, type Reply } from "./brain.ts";
 import { ClaudeManager, type Permission } from "./claude.ts";
 import { Memory } from "./memory.ts";
 import { classify, isApproval } from "./safety.ts";
@@ -222,6 +222,7 @@ ipcMain.on("claude:close-project", () => {
 });
 
 app.whenReady().then(() => {
+  pruneLog();
   Menu.setApplicationMenu(null);
   // No permissions for the page: the microphone belongs to the voice engine, never the browser.
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));

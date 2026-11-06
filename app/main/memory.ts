@@ -11,9 +11,13 @@ type Row = Record<string, unknown>;
 
 export const containsSecret = (text: string) => SECRET.test(text);
 
+export function meaningfulWords(text: string): string[] {
+  return (text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((word) => !STOP_WORDS.has(word));
+}
+
 // Turns free text into a safe search: quoted words joined with OR.
 export function searchTerms(text: string): string | null {
-  const words = (text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((word) => !STOP_WORDS.has(word));
+  const words = meaningfulWords(text);
   return words.length ? [...new Set(words)].map((word) => `"${word}"`).join(" OR ") : null;
 }
 
@@ -71,13 +75,15 @@ export class Memory {
     const row = this.db.prepare("SELECT id, text FROM facts ORDER BY id DESC LIMIT 1").get() as Row | undefined;
     if (!row) return null;
     this.db.prepare("DELETE FROM facts WHERE id = ?").run(row.id as number);
+    // Also removes the "remember that..." line it came from.
+    this.forget(String(row.text));
     return String(row.text);
   }
 
   // Forgetting is real: it removes matching facts and conversation lines from the file.
   // Every word has to match here, so "forget my dentist" doesn't wipe everything saying "my".
   forget(query: string): number {
-    const words = (query.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((word) => !STOP_WORDS.has(word));
+    const words = meaningfulWords(query);
     if (!words.length) return 0;
     const terms = words.map((word) => `"${word}"`).join(" AND ");
     let removed = 0;
