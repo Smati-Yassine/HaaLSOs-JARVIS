@@ -28,6 +28,9 @@ const MAX_LISTED = 40;
 // Claude's folder name for a project: every character but letters and digits becomes a dash.
 export const claudeFolderName = (path: string) => path.replace(/[^a-zA-Z0-9]/g, "-");
 
+// Pasted text arrives wrapped in a tag, which says nothing about the session.
+export const plainPrompt = (text: string) => text.replace(/<\/?pasted_content[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+
 // Finds a session's title in its record file: Claude's own title if it made one, otherwise the
 // first thing that was asked. Prompts that are really system text don't count.
 export function sessionTitle(lines: string[]): string | null {
@@ -46,8 +49,9 @@ export function sessionTitle(lines: string[]): string | null {
     if (entry.type === "ai-title" && entry.aiTitle && !titled) titled = String(entry.aiTitle);
     if (first === null && entry.type === "user" && !entry.isSidechain && !entry.isMeta) {
       const content = entry.message?.content;
-      const words = typeof content === "string" ? content : Array.isArray(content) ? content.find((part: any) => part.type === "text")?.text : null;
-      if (typeof words === "string" && words.trim() && !words.trimStart().startsWith("<")) first = words.trim();
+      const raw = typeof content === "string" ? content : Array.isArray(content) ? content.find((part: any) => part.type === "text")?.text : null;
+      const words = typeof raw === "string" ? plainPrompt(raw) : "";
+      if (words && !words.startsWith("<")) first = words;
     }
   }
   // Some tools put a "[tag | date]" in front of the prompt, which says nothing about the session.
@@ -371,7 +375,8 @@ export class ClaudeManager {
         if (session) {
           session.working = true;
           if (session.title === "New session" && typeof data.prompt === "string") {
-            session.title = data.prompt.length > 34 ? `${data.prompt.slice(0, 34)}...` : data.prompt;
+            const words = plainPrompt(data.prompt);
+            if (words) session.title = words.length > 34 ? `${words.slice(0, 34)}...` : words;
             this.remember(session);
           }
         }
@@ -648,7 +653,7 @@ export class ClaudeManager {
     this.path = path;
     this.sessions.clear();
     for (const stored of this.load(project)) {
-      const session = this.blank(stored.id, "claude", stored.title);
+      const session = this.blank(stored.id, "claude", plainPrompt(stored.title) || stored.title);
       session.state = stored.archived ? "archived" : "paused";
       this.sessions.set(stored.id, session);
     }

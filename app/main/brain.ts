@@ -225,7 +225,22 @@ export const isStatementAboutSelf = (said: string) => {
   return /^(i|i'm|im|i am|i've|i was|i just|my)\b/i.test(text) && !/\b(need|want|wanna|would like|'d like|let me|let's|please|finished|done|can you|could you)\b/i.test(text);
 };
 
-const FOLLOW_UP_START = /^(and|so|but|what about|how about|why|when|where|who|how|what|which|is|are|was|were|does|did|can)\b/i;
+// "Okay, uh" is someone still thinking, not a request.
+const HESITATION = /\b(uh+|um+|umm+|hm+|er+m?|ah+|mm+)\b/i;
+export const isHesitation = (said: string) => HESITATION.test(said) && clean(said).split(/[\s,.!?…-]+/).filter(Boolean).every((word) => HESITATION.test(word) || /^(ok|okay|so|well|yeah|oh|like|and|but|wait|sir)$/i.test(word));
+
+// The small model giving up, in any of the ways it words that.
+export const isRefusal = (answer: string) => /^((i'?m|i am) (sorry|afraid)|sorry|i apologi[sz]e)?[,.]?\s*(sir[,.]?\s*)?(but\s+)?(i|i'm)\s+(can'?t|cannot|unable|am unable|not able|am not able|don'?t have (access|the ability))\b/i.test(answer);
+
+// A long message while a project is open is talk for Claude, unless it's plainly asking Jarvis something.
+export const isMessageForClaude = (said: string) => {
+  if (said.trim().includes("\n")) return true;
+  const text = clean(said);
+  if (text.split(/\s+/).length < 10 || said.trim().endsWith("?") || isStatementAboutSelf(said)) return false;
+  return !/^(what|what's|whats|who|who's|when|where|why|how|which|is|are|was|were|do|does|did|can|could|should|would|will|tell me|search|google|look up|find out|remind|remember|forget|open|close|play|set|turn)\b/i.test(text);
+};
+
+const FOLLOW_UP_START =/^(and|so|but|what about|how about|why|when|where|who|how|what|which|is|are|was|were|does|did|can)\b/i;
 const POINTS_AT_BEFORE = /^(and|what about|how about)\b|\b(he|she|they|him|her|them|it|that|there|those|his|their|its)\b/i;
 
 // "How old is he?" means nothing to a search engine without the question before it.
@@ -575,6 +590,7 @@ Rewritten:`);
     if (/^(yes|yeah|yep|no|nope|ok|okay|sure|confirm|proceed|go ahead|do it)(,? sir)?$/i.test(clean(said))) {
       return { say: "There's nothing waiting for an answer, sir.", source: "fast", ms: Date.now() - begin };
     }
+    if (isHesitation(said)) return { say: "Yes, sir?", source: "fast", listen: true, ms: Date.now() - begin };
 
     if (this.memory) {
       const command = clean(said);
@@ -596,7 +612,8 @@ Rewritten:`);
       const name = clean(said).replace(/^(call it|name it|it'?s called|called|named)\s+/i, "");
       return this.runTool({ tool: "create_project", args: { name } }, "fast", said, begin);
     }
-    const wantsProject = this.ctx.claude ? newProjectRequest(clean(said)) : null;
+    // A message of several lines may mention a new project, but it isn't asking Jarvis to make one.
+    const wantsProject = this.ctx.claude && !said.trim().includes("\n") ? newProjectRequest(clean(said)) : null;
     if (wantsProject?.name) return this.runTool({ tool: "create_project", args: { name: wantsProject.name } }, "fast", said, begin);
     if (wantsProject) {
       this.awaitingName = true;
@@ -650,10 +667,14 @@ Rewritten:`);
       return this.runTool({ tool: "project_info", args: { project: mentioned } }, "fast", said, begin);
     }
     const intent = projectIntent(clean(said), projects, this.lastProject);
-    if (intent && "project" in intent) {
+    const open = this.ctx.claude?.openProject;
+    const forClaude = Boolean(open) && isMessageForClaude(said) && !splitCommands(said);
+    // Naming a different project stays with Jarvis. Everything else long belongs to Claude.
+    if (intent && "project" in intent && !(forClaude && intent.project === open)) {
       this.lastProject = intent.project;
       return this.runTool({ tool: "start_coding", args: { project: intent.project } }, "fast", said, begin);
     }
+    if (forClaude) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
     if (intent) {
       if (this.ctx.claude?.openProject) {
         return this.finish(said, `${this.ctx.claude.openProject} is already open, sir.`, "fast", begin);
@@ -718,7 +739,7 @@ Rewritten:`);
       const answer = await chatReply([...this.history, { role: "user", content: said }], background, depth === "small" ? 0.6 : 0.1, useDeep);
       // The small model gave up on a request, so the one that can do it gets it. Only a plain
       // "I can't" at the start counts: a dry remark may well contain the word.
-      if (this.ctx.claude && /^(i'?m sorry,? |sorry,? |i'?m afraid )?(sir,? )?(i|i'm)\s+(can'?t|cannot|unable|am unable|not able|am not able|don'?t have (access|the ability))\b/i.test(answer) && !/\?\s*$/.test(said)) {
+      if (this.ctx.claude && isRefusal(answer) && !/\?\s*$/.test(said)) {
         return this.handToClaude(said, "model", begin);
       }
       return this.finish(said, speakable(answer) || "I didn't catch that, sir.", "model", begin);

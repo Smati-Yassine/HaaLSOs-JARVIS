@@ -8,9 +8,9 @@ import { DatabaseSync } from "node:sqlite";
 
 import { askClaudeOnce, depthOf } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
-import { isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
+import { isHesitation, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
-import { resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
+import { plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
@@ -752,6 +752,63 @@ test("typing claude opens the home folder, or shows Claude if it's already open"
   assert.equal((await jarvis.handle("open claude")).say, "Here's Claude, sir, in your home folder.");
   assert.equal(shown, 1);
   assert.equal(started.length, 1);
+});
+
+test("a long message goes to Claude instead of reopening the open project", async () => {
+  const asked: string[] = [];
+  const started: string[] = [];
+  const claude = {
+    openProject: "HaaLSO's JARVIS" as string | null,
+    start(project: string) {
+      started.push(project);
+    },
+    ask(words: string) {
+      asked.push(words);
+      return true;
+    },
+    close() {},
+  };
+  const jarvis = new Jarvis({ dryRun: false, claude, projects: () => [...PROJECTS] });
+  await jarvis.handle("start coding jarvis");
+  started.length = 0;
+  const message = "nope thats too much and i want it to be something i dont know\ncome on\ndont overdo pages keep it clean\ndont look at old artifact look at the base code so you understand";
+  const reply = await jarvis.handle(message);
+  assert.deepEqual(asked, [message]);
+  assert.deepEqual(started, []);
+  assert.doesNotMatch(reply.say, /already open/);
+  // On one line, too.
+  const oneLine = "nope thats too much keep it clean and look at the base code";
+  await jarvis.handle(oneLine);
+  assert.equal(asked.at(-1), oneLine);
+  // Naming another project stays with Jarvis, and a question for him isn't taken away.
+  const sent = asked.length;
+  assert.match((await jarvis.handle("okay now i want to start working on luminelle instead of this one")).say, /still open/);
+  assert.equal(asked.length, sent);
+  assert.ok(!isMessageForClaude("what is the capital of australia and how many people live there"));
+  assert.ok(!isMessageForClaude("how are you"));
+});
+
+test("pointing back at a project only counts in a short sentence", () => {
+  assert.deepEqual(projectIntent("let's work on it", PROJECTS, "resido"), { project: "resido" });
+  assert.equal(projectIntent("dont touch it and just look at the base code so you understand", PROJECTS, "resido"), null);
+});
+
+test("someone still thinking gets a prompt, and every wording of a refusal counts", async () => {
+  const jarvis = new Jarvis({ dryRun: true, projects: () => [...PROJECTS] });
+  for (const said of ["Okay, uh", "um", "hmm", "so, uh...", "uh, well"]) {
+    assert.ok(isHesitation(said), said);
+    assert.equal((await jarvis.handle(said)).say, "Yes, sir?", said);
+  }
+  for (const said of ["okay", "uh open firefox", "what is um", "summer"]) assert.ok(!isHesitation(said), said);
+  for (const answer of ["I am sorry, sir. I cannot fulfill that request due to my constraints.", "I'm afraid I can't do that.", "Sorry, I cannot.", "I am unable to.", "I can't."]) assert.ok(isRefusal(answer), answer);
+  for (const answer of ["Very well, sir.", "I can tell you that it is raining.", "I am sorry to hear that, sir."]) assert.ok(!isRefusal(answer), answer);
+});
+
+test("session titles leave out the wrapper around pasted text", () => {
+  assert.equal(plainPrompt('\n\n<pasted_content id="60f7">\ni wan...'), "i wan...");
+  const user = (content: string) => JSON.stringify({ type: "user", message: { content } });
+  assert.equal(sessionTitle([user('<pasted_content id="1">\nfix the login\n</pasted_content>')]), "fix the login");
+  assert.equal(sessionTitle([user("<command-name>/clear</command-name>"), user("real prompt")]), "real prompt");
 });
 
 test("answering which project with jarvis opens the Jarvis project, and his name alone gets a reply", async () => {

@@ -84,7 +84,8 @@ export function projectIntent(said: string, names: string[], last: string | null
   const named = projectInSentence(said, names);
   if (named && (WANTS_WORK.test(said) || /\bproject\b/i.test(said))) return { project: named };
   if (!WANTS_WORK.test(said)) return null;
-  if (POINTS_BACK.test(said) && last && /\b(work|working|cod(e|ing)|start|open|begin|continue|resume)\b/i.test(said)) {
+  // "Let's work on it" points back. In a long message, "it" and "code" are just ordinary words.
+  if (said.split(/\s+/).length <= 6 && POINTS_BACK.test(said) && last && /\b(work|working|cod(e|ing)|start|open|begin|continue|resume)\b/i.test(said)) {
     return { project: last };
   }
   if (NO_NAME.test(said)) return { ask: true };
