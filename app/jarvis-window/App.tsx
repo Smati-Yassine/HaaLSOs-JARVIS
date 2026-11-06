@@ -10,7 +10,7 @@ type Turn = { role: "user" | "jarvis"; text: string };
 type Chat = { id: number; title: string; updated: number; turns: number };
 type Fact = { id: number; text: string };
 // A restored message is shown as it is, without the letters resolving again.
-type Message = { id: number; from: "jarvis" | "you"; text: string; restored?: boolean };
+type Message = { id: number; from: "jarvis" | "you"; text: string; restored?: boolean; viaClaude?: boolean };
 type VoiceEvent = {
   type: string;
   text?: string;
@@ -328,8 +328,8 @@ export function App() {
     box.style.height = `${Math.min(box.scrollHeight, 200)}px`;
   }, [draft, tab]);
 
-  const speak = useCallback((text: string, withPending?: Pending) => {
-    setMessages((list) => [...list, { id: nextId++, from: "jarvis", text }]);
+  const speak = useCallback((text: string, withPending?: Pending, tool?: string) => {
+    setMessages((list) => [...list, { id: nextId++, from: "jarvis", text, viaClaude: tool === "claude_answer" }]);
     setPending(withPending ?? null);
     // With a voice, the line follows the real sound. Without one, it estimates.
     if (voiceRef.current === "on" || voiceRef.current === "muted" || voiceRef.current === "loading") return;
@@ -381,7 +381,7 @@ export function App() {
           setMood("idle");
           break;
         case "reply":
-          speak(event.reply!.say, event.reply!.pending);
+          speak(event.reply!.say, event.reply!.pending, event.reply!.tool);
           setBusy(false);
           break;
         case "chat-reset":
@@ -449,7 +449,7 @@ export function App() {
       setMessages((list) => [...list, { id: nextId++, from: "you", text: said }]);
       try {
         const reply = await window.jarvis.ask(said);
-        speak(reply.say, reply.pending);
+        speak(reply.say, reply.pending, reply.tool);
         if (voiceRef.current !== "on" && voiceRef.current !== "muted") setMood("idle");
       } catch {
         speak("Something went wrong on my side, sir. Please try again.");
@@ -578,7 +578,7 @@ export function App() {
               <div className="log" role="log" aria-live="polite">
                 {messages.map((message) => (
                   <div key={message.id} className={`message ${message.from}`}>
-                    <small>{message.from === "jarvis" ? "Jarvis" : "You"}</small>
+                    <small>{message.from === "jarvis" ? (message.viaClaude ? "Jarvis, asking Claude" : "Jarvis") : "You"}</small>
                     {message.from === "jarvis" && !message.restored ? <Spoken text={message.text} onDone={scrollDown} /> : <p>{message.text}</p>}
                   </div>
                 ))}

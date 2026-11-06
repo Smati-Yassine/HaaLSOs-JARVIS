@@ -1,7 +1,7 @@
 // Runs the real Claude Code in real terminals, and hears what it does through its official
 // hooks and status line. Jarvis never reads your login, and never answers a prompt by itself.
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +19,99 @@ const SETTINGS = join(RUN, "claude-settings.json");
 const STORE = join(HOME, "claude-sessions.json");
 const PREFERENCES = join(HOME, "preferences.json");
 const MAX_BUFFER = 400_000;
+
+// Where Claude Code keeps its own records. Only ever read here, never written.
+const CLAUDE_HOME = process.env.JARVIS_CLAUDE_HOME || join(homedir(), ".claude");
+const MAX_LISTED = 40;
+
+// Claude's folder name for a project: every character but letters and digits becomes a dash.
+export const claudeFolderName = (path: string) => path.replace(/[^a-zA-Z0-9]/g, "-");
+
+// Finds a session's title in its record file: Claude's own title if it made one, otherwise the
+// first thing that was asked. Prompts that are really system text don't count.
+export function sessionTitle(lines: string[]): string | null {
+  let first: string | null = null;
+  let titled: string | null = null;
+  for (const line of lines) {
+    let entry: Record<string, any>;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // The last line of a chunk can be cut off.
+    }
+    // Run automatically by a program, not a session anyone worked in. Claude's own list hides these.
+    if (entry.entrypoint === "sdk-cli") return null;
+    if (entry.type === "custom-title" && entry.customTitle) titled = String(entry.customTitle);
+    if (entry.type === "ai-title" && entry.aiTitle && !titled) titled = String(entry.aiTitle);
+    if (first === null && entry.type === "user" && !entry.isSidechain && !entry.isMeta) {
+      const content = entry.message?.content;
+      const words = typeof content === "string" ? content : Array.isArray(content) ? content.find((part: any) => part.type === "text")?.text : null;
+      if (typeof words === "string" && words.trim() && !words.trimStart().startsWith("<")) first = words.trim();
+    }
+  }
+  // Some tools put a "[tag | date]" in front of the prompt, which says nothing about the session.
+  const title = (titled ?? first)?.replace(/^\[[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+  return title ? (title.length > 60 ? `${title.slice(0, 60).trimEnd()}...` : title) : null;
+}
+
+// Reads both ends of the file: the first prompt is near the start, Claude's title near the end.
+function readEnds(path: string, size: number): string[] {
+  const chunk = 256_000;
+  const file = openSync(path, "r");
+  try {
+    const read = (from: number, length: number) => {
+      const buffer = Buffer.alloc(length);
+      const count = readSync(file, buffer, 0, length, from);
+      return buffer.toString("utf8", 0, count).split("\n");
+    };
+    if (size <= chunk * 2) return read(0, size);
+    return [...read(0, chunk), ...read(size - chunk, chunk).slice(1)];
+  } finally {
+    closeSync(file);
+  }
+}
+
+export type OutsideSession = { id: string; title: string; updated: number };
+
+// Every session Claude has for this folder, wherever it was started: VS Code, a terminal, Jarvis.
+export function outsideSessions(path: string, claudeHome = CLAUDE_HOME): OutsideSession[] {
+  const folder = join(claudeHome, "projects", claudeFolderName(path));
+  if (!existsSync(folder)) return [];
+  const files = readdirSync(folder)
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => {
+      const stat = statSync(join(folder, name));
+      return { name, size: stat.size, updated: stat.mtimeMs };
+    })
+    .sort((a, b) => b.updated - a.updated);
+  const found: OutsideSession[] = [];
+  for (const file of files) {
+    if (found.length >= MAX_LISTED) break;
+    const title = sessionTitle(readEnds(join(folder, file.name), file.size));
+    // No real prompt means nothing was ever said in it, so there's nothing to resume.
+    if (title) found.push({ id: file.name.replace(/\.jsonl$/, ""), title, updated: file.updated });
+  }
+  return found;
+}
+
+// Sessions open right now in another program. Resuming one of those would have two copies of
+// Claude writing to the same conversation.
+export function sessionsInUse(claudeHome = CLAUDE_HOME): Set<string> {
+  const folder = join(claudeHome, "sessions");
+  const open = new Set<string>();
+  if (!existsSync(folder)) return open;
+  for (const name of readdirSync(folder)) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const { pid, sessionId } = JSON.parse(readFileSync(join(folder, name), "utf8"));
+      process.kill(Number(pid), 0); // Throws if that program has ended.
+      if (typeof sessionId === "string") open.add(sessionId);
+    } catch {
+      // A leftover record from something already closed.
+    }
+  }
+  return open;
+}
 
 export const MODELS = [
   { id: "claude-fable-5-1", label: "Fable 5.1" },
@@ -57,6 +150,8 @@ export type SessionView = {
   context: number | null;
   tokens: number | null;
   minutes: number;
+  // Running in VS Code or another terminal right now, so it shouldn't be opened here too.
+  elsewhere: boolean;
 };
 export type Snapshot = {
   project: string | null;
@@ -147,6 +242,7 @@ export class ClaudeManager {
   private cols = 100;
   private rows = 30;
   private bypass = false;
+  private watcher: ReturnType<typeof setInterval> | null = null;
   private readonly on: Listeners;
 
   constructor(listeners: Listeners) {
@@ -446,7 +542,7 @@ export class ClaudeManager {
   private blank(id: string, kind: Session["kind"], title: string): Session {
     return {
       id, kind, title, state: "running", working: false, needsTrust: false, model: null, effort: null, context: null,
-      tokens: null, minutes: 0, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, bypassAsked: false, gate: null, leftoverInput: false,
+      tokens: null, minutes: 0, elsewhere: false, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, bypassAsked: false, gate: null, leftoverInput: false,
       screen: kind === "claude" ? new headless.Terminal({ cols: this.cols, rows: this.rows, scrollback: 0, allowProposedApi: true }) : null, askSeq: 0,
     };
   }
@@ -469,7 +565,54 @@ export class ClaudeManager {
       session.state = stored.archived ? "archived" : "paused";
       this.sessions.set(stored.id, session);
     }
+    this.syncOutside();
+    if (this.watcher) clearInterval(this.watcher);
+    this.watcher = setInterval(() => this.syncOutside(), 15_000);
+    this.watcher.unref();
     return this.newSession();
+  }
+
+  // Brings in sessions from VS Code and terminals, most recent first, including new ones that
+  // appear while the project is open.
+  private syncOutside() {
+    if (!this.path) return;
+    let found: OutsideSession[];
+    let inUse: Set<string>;
+    try {
+      found = outsideSessions(this.path);
+      inUse = sessionsInUse();
+    } catch {
+      return; // Unreadable records shouldn't get in the way of working.
+    }
+    let changed = false;
+    for (const item of found) {
+      const known = this.sessions.get(item.id);
+      if (known) {
+        if (known.title !== "New session" && !known.pty && known.state === "paused" && known.title !== item.title) {
+          known.title = item.title;
+          changed = true;
+        }
+      } else {
+        const session = this.blank(item.id, "claude", item.title);
+        session.state = "paused";
+        this.sessions.set(item.id, session);
+        changed = true;
+      }
+    }
+    for (const session of this.sessions.values()) {
+      const elsewhere = !session.pty && inUse.has(session.id);
+      if (session.elsewhere !== elsewhere) {
+        session.elsewhere = elsewhere;
+        changed = true;
+      }
+    }
+    if (changed) {
+      // What's running stays on top, then the rest with the most recent first.
+      const when = new Map(found.map((item) => [item.id, item.updated]));
+      const rank = (session: Session) => (session.pty ? Infinity : (when.get(session.id) ?? 0));
+      this.sessions = new Map([...this.sessions].sort(([, a], [, b]) => rank(b) - rank(a)));
+      this.changed();
+    }
   }
 
   newSession(): string {
@@ -493,7 +636,7 @@ export class ClaudeManager {
 
   select(id: string) {
     const session = this.sessions.get(id);
-    if (!session || session.state === "archived") return;
+    if (!session || session.state === "archived" || session.elsewhere) return;
     this.active = id;
     if (session.kind === "claude" && !session.pty) this.launchClaude(session, true);
     this.changed();
@@ -529,6 +672,8 @@ export class ClaudeManager {
   }
 
   closeProject() {
+    if (this.watcher) clearInterval(this.watcher);
+    this.watcher = null;
     for (const session of this.sessions.values()) {
       const pty = session.pty;
       session.pty = null;
@@ -664,7 +809,7 @@ export class ClaudeManager {
   snapshot(): Snapshot {
     const sessions: SessionView[] = [...this.sessions.values()].map((session) => ({
       id: session.id, kind: session.kind, title: session.title, state: session.state, working: session.working, needsTrust: session.needsTrust,
-      model: session.model, effort: session.effort, context: session.context, tokens: session.tokens, minutes: session.minutes,
+      model: session.model, effort: session.effort, context: session.context, tokens: session.tokens, minutes: session.minutes, elsewhere: session.elsewhere,
     }));
     return { project: this.project, path: this.path, sessions, active: this.active, plan: this.plan, models: MODELS, efforts: EFFORTS, bypass: this.bypass };
   }

@@ -17,6 +17,7 @@ type Session = {
   context: number | null;
   tokens: number | null;
   minutes: number;
+  elsewhere: boolean;
 };
 export type Snapshot = {
   project: string | null;
@@ -197,9 +198,16 @@ export function ClaudePanel({ snap, mode, asking, onMinimize }: { snap: Snapshot
           <div className="side-title">Claude sessions<button type="button" aria-label="New Claude session" onClick={() => window.claude.newSession()}>+</button></div>
           {claudes.map((session) => (
             <div key={session.id} className={`row ${session.id === snap.active ? "on" : ""}`}>
-              <button type="button" className="row-main" onClick={() => window.claude.select(session.id)}>
+              <button
+                type="button"
+                className="row-main"
+                disabled={session.elsewhere}
+                title={session.elsewhere ? "Open in VS Code or another terminal. Close it there to continue it here." : session.title}
+                onClick={() => window.claude.select(session.id)}
+              >
                 <span className={`dot ${session.working ? "working" : session.state}`} />
-                <span className="name" title={session.title}>{session.title}</span>
+                <span className="name">{session.title}</span>
+                {session.elsewhere && <span className="pct">open elsewhere</span>}
                 {session.context !== null && <span className="pct">{percent(session.context)}</span>}
               </button>
               <button type="button" className="row-x" aria-label={`Archive ${session.title}`} onClick={() => window.claude.archive(session.id)}>×</button>

@@ -43,6 +43,8 @@ export type Context = {
   ack?: (words: string) => void;
   projects?: () => string[];
   reminders?: Pick<Memory, "addReminder" | "reminders" | "clearReminders">;
+  // Sends a question to Claude. Only the real app has this, so tests never spend plan usage.
+  thinker?: (prompt: string) => Promise<string | null>;
   clipboard?: { read(): string | Promise<string>; write(text: string): void };
 };
 

@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
 import { DatabaseSync } from "node:sqlite";
 
+import { askClaudeOnce, depthOf } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
-import { readMenu, trustSelection } from "./claude.ts";
+import { claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
@@ -719,6 +720,7 @@ test("news about himself isn't taken as a command, but a request still is", () =
 test("a question about his own schedule isn't a question about the clock", () => {
   assert.ok(!toolFitsWords("get_time", "what time do I wake up"));
   assert.ok(toolFitsWords("get_time", "could you tell me what time it is"));
+  assert.ok(!toolFitsWords("get_time", "if today is Friday what day is it in 10 days"));
 });
 
 test("claude alone means the home folder, and claude with a name means that project", () => {
@@ -940,4 +942,100 @@ test("notes work with memory, and timers are really stored", async () => {
   assert.match((await jarvis.handle("what timers do i have")).say, /5 minute timer/);
   assert.equal((await jarvis.handle("cancel my timer")).say, "All cancelled, sir.");
   assert.equal(memory.reminders().length, 0);
+});
+
+test("Claude's folder name for a project matches how it stores them", () => {
+  assert.equal(claudeFolderName("/home/haalso/Documents/Projects/HaaLSO's JARVIS"), "-home-haalso-Documents-Projects-HaaLSO-s-JARVIS");
+  assert.equal(claudeFolderName("/home/haalso"), "-home-haalso");
+});
+
+test("a session's title comes from Claude's own title, or else the first real prompt", () => {
+  const user = (content: unknown, extra = {}) => JSON.stringify({ type: "user", message: { content }, ...extra });
+  assert.equal(sessionTitle([user("fix the login page")]), "fix the login page");
+  assert.equal(sessionTitle([user("fix it"), JSON.stringify({ type: "ai-title", aiTitle: "Login page repair" })]), "Login page repair");
+  assert.equal(sessionTitle([JSON.stringify({ type: "ai-title", aiTitle: "Old" }), JSON.stringify({ type: "custom-title", customTitle: "Mine" }), JSON.stringify({ type: "ai-title", aiTitle: "New" })]), "Mine");
+  assert.equal(sessionTitle([user([{ type: "text", text: "from vs code" }])]), "from vs code");
+  assert.equal(sessionTitle([user("<command-name>/clear</command-name>"), user("real one")]), "real one");
+  assert.equal(sessionTitle([user("agent talk", { isSidechain: true })]), null);
+  assert.equal(sessionTitle(["{cut off", user("still found")]), "still found");
+  assert.equal(sessionTitle([]), null);
+  assert.equal(sessionTitle([user("run by a program", { entrypoint: "sdk-cli" })]), null);
+  assert.equal(sessionTitle([user("[voice@desk | Thursday] say hello", { entrypoint: "claude-vscode" })]), "say hello");
+});
+
+test("sessions started elsewhere are found, newest first, and empty ones are skipped", () => {
+  const home = mkdtempSync(joinPath(tmpdir(), "jarvis-claude-home-"));
+  const folder = joinPath(home, "projects", claudeFolderName("/x/my app"));
+  mkdirSync(folder, { recursive: true });
+  const write = (id: string, line: string, when: number) => {
+    const path = joinPath(folder, `${id}.jsonl`);
+    writeFileSync(path, `${line}\n`);
+    utimesSync(path, when, when);
+  };
+  write("old", JSON.stringify({ type: "user", message: { content: "older work" } }), 1000);
+  write("new", JSON.stringify({ type: "user", message: { content: "newer work" } }), 2000);
+  write("empty", JSON.stringify({ type: "summary" }), 3000);
+  mkdirSync(joinPath(folder, "a-folder.jsonl.d"));
+  assert.deepEqual(outsideSessions("/x/my app", home).map((item) => [item.id, item.title]), [["new", "newer work"], ["old", "older work"]]);
+  assert.deepEqual(outsideSessions("/nowhere", home), []);
+  rmSync(home, { recursive: true });
+});
+
+test("only sessions whose program is still running count as open elsewhere", () => {
+  const home = mkdtempSync(joinPath(tmpdir(), "jarvis-claude-home-"));
+  mkdirSync(joinPath(home, "sessions"));
+  writeFileSync(joinPath(home, "sessions", "1.json"), JSON.stringify({ pid: process.pid, sessionId: "alive" }));
+  writeFileSync(joinPath(home, "sessions", "2.json"), JSON.stringify({ pid: 2 ** 30, sessionId: "gone" }));
+  writeFileSync(joinPath(home, "sessions", "3.json"), "not json");
+  assert.deepEqual([...sessionsInUse(home)], ["alive"]);
+  rmSync(home, { recursive: true });
+});
+
+test("how much thinking a sentence deserves", () => {
+  for (const said of ["good morning", "thanks", "how are you", "tell me a joke", "you're the best", "who are you", "nice one", "I had pizza"]) assert.equal(depthOf(said), "small", said);
+  for (const said of ["who painted the Mona Lisa", "what's the speed of light", "what does ephemeral mean", "how old was he", "when did Rome fall", "capital of Peru?"]) assert.equal(depthOf(said), "knowledge", said);
+  for (const said of ["if I have 3 apples and eat one how many do I have?", "if today is Friday what day is it in 10 days", "a bat and a ball cost 1.10 in total, how much is the ball?", "which is heavier, a kilo of steel or a kilo of feathers", "how many letters are in strawberry"]) assert.equal(depthOf(said), "reasoning", said);
+  for (const said of ["why is the sky blue", "should I go to sleep or keep coding?", "explain how vaccines work", "how do I recover a deleted file", "I just deleted my whole project by mistake", "my laptop won't boot", "what's the difference between RAM and ROM", "is it safe to update my BIOS", `this ${"word ".repeat(30)}`]) assert.equal(depthOf(said), "serious", said);
+});
+
+test("a serious question goes to Claude with what it needs, and comes back labelled", async () => {
+  const prompts: string[] = [];
+  const memory = new Memory(":memory:");
+  memory.remember("I live in Tunis");
+  const jarvis = new Jarvis({ dryRun: true, thinker: async (prompt) => { prompts.push(prompt); return "**Check** the Trash first, sir."; } }, memory);
+  const reply = await jarvis.handle("I just deleted my whole project by mistake");
+  assert.equal(reply.tool, "claude_answer");
+  assert.equal(reply.say, "Check the Trash first, sir.");
+  assert.match(prompts[0], /He now says: I just deleted my whole project by mistake/);
+  assert.match(prompts[0], /I live in Tunis/);
+});
+
+test("a question with a secret never leaves the computer, and small talk spends nothing", async () => {
+  let asked = 0;
+  const thinker = async () => { asked += 1; return "from claude"; };
+  const jarvis = new Jarvis({ dryRun: true, thinker });
+  assert.notEqual((await jarvis.handle("why does my password keep failing")).tool, "claude_answer");
+  assert.notEqual((await jarvis.handle("thanks")).tool, "claude_answer");
+  assert.equal(asked, 0);
+});
+
+test("if Claude can't answer, Jarvis still does", async () => {
+  const jarvis = new Jarvis({ dryRun: true, thinker: async () => null });
+  const reply = await jarvis.handle("why is the sky blue");
+  assert.notEqual(reply.tool, "claude_answer");
+  assert.ok(reply.say.length > 0);
+});
+
+test("a Claude failure or a missing program comes back as no answer", async () => {
+  assert.equal(await askClaudeOnce("x", "y", "/nonexistent/claude"), null);
+  assert.equal(await askClaudeOnce("x", "y", "/usr/bin/false"), null);
+});
+
+test("ask claude with nothing open is a question, not a request for a project", async () => {
+  let got = "";
+  const claude = { openProject: null as string | null, start() {}, ask: () => true, close() {} };
+  const jarvis = new Jarvis({ dryRun: true, claude, projects: () => [], thinker: async (prompt) => { got = prompt; return "An answer, sir."; } });
+  const reply = await jarvis.handle("ask claude about the history of Rome");
+  assert.equal(reply.say, "An answer, sir.");
+  assert.match(got, /He now says: the history of Rome/);
 });

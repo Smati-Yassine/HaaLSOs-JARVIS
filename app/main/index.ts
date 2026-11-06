@@ -13,6 +13,7 @@ import { Memory } from "./memory.ts";
 import { classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { healthCheck, setStartAtLogin, startsAtLogin } from "./system.ts";
 import { Voice, type VoiceEvent } from "./voice.ts";
+import { askClaudeOnce } from "./thinker.ts";
 import { reminderMessage } from "./tools.ts";
 import { startSearch, stopSearch } from "./web.ts";
 
@@ -35,6 +36,7 @@ const memory = new Memory(process.env.JARVIS_MEMORY || join(homedir(), ".Jarvis"
 const jarvis = new Jarvis({
   dryRun: process.env.JARVIS_DRY_RUN === "1",
   ack: (words) => voice?.say(words), // Searching takes seconds, so Jarvis says so first.
+  thinker: (prompt) => askClaudeOnce(prompt),
   clipboard: { read: () => clipboard.readText(), write: (text) => clipboard.writeText(text) },
 }, memory);
 let window: BrowserWindow | null = null;
