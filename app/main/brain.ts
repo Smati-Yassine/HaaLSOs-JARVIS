@@ -3,9 +3,10 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFi
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { abilityCall } from "./abilities.ts";
 import { claudeAction, clean, fastPath, looksLikeCoding, splitCommands, type Call } from "./fastpath.ts";
 import { lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
-import { claudeShortcut, findProject, listProjects, projectInSentence, projectIntent } from "./projects.ts";
+import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
 import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
@@ -32,7 +33,7 @@ paths like ~/Downloads.`;
 const PERSONA = `You are Jarvis, a brilliant, calm, loyal English butler who is also the software running his computer. \
 You call him sir. Your humour is dry understatement. Reply in one or two short plain sentences, then stop. Never ask him \
 a question or offer anything. In this conversation you cannot do anything, only talk, so never claim to have recorded, \
-changed, adjusted or started something. You have no sensors. If you don't know a fact, say so instead of guessing.`;
+changed, adjusted, scheduled or started something. You have no sensors, calendar, email or alarms in this conversation. If you don't know a fact, say so instead of guessing.`;
 
 // A small model copies examples far better than it follows a description. These are original lines.
 const MANNER: Message[] = [
@@ -43,6 +44,8 @@ const MANNER: Message[] = [
   ["I broke everything", "Calmly, sir. Very little is ever as broken as it first appears."],
   ["who wrote Hamlet?", "Shakespeare, sir."],
   ["do you like me?", "You remain my favourite source of work, sir."],
+  ["what's on my calendar?", "I can't see your calendar, sir."],
+  ["order me a pizza", "I can't do that from here, sir."],
   ["thanks", "Always a pleasure, sir."],
 ].flatMap(([said, reply]) => [{ role: "user", content: said }, { role: "assistant", content: reply }]);
 
@@ -129,6 +132,10 @@ export function parseTextCall(content: string): Call | null {
 
 // The model sometimes picks one of these for no reason, so these actions need matching words.
 const NEEDS_WORDS: Record<string, RegExp> = {
+  close_project: /\b(project|coding|code|finished|done)\b/i,
+  set_volume: /\b(volume|sound|audio|mute|unmute|louder|quieter|silence)\b/i,
+  media_control: /\b(music|song|track|play|pause|skip|resume|video|next|previous)\b/i,
+  system_info: /\b(battery|charging|cpu|processor|memory|ram|disk|storage|space|network|wi-?fi|internet|connected|online)\b/i,
   google_search: /\bgoogle\b/i,
   get_time: /\b(time|date|day|clock|today|tonight)\b/i,
   window_control: /\b(windows?|minimi[sz]e|maximi[sz]e|unmaximi[sz]e|focus|restore|shrink|front|switch to)\b/i,
@@ -256,6 +263,13 @@ export async function summarize(message: string): Promise<string> {
   }
 }
 
+// "How are you jarvis? Start a new project" is a greeting and then the actual request.
+export function splitGreeting(said: string): { rest: string; askedAfterHim: boolean } {
+  const match = said.trim().match(/^((?:hi|hello|hey|yo|good (?:morning|afternoon|evening)|how are you(?: doing| today)*|how'?s it going)(?:,?\s+(?:jarvis|sir))?)\s*[,.!?\n]+\s*(?=\S)([\s\S]+)$/i);
+  if (!match) return { rest: said, askedAfterHim: false };
+  return { rest: match[2], askedAfterHim: /^how/i.test(match[1]) };
+}
+
 export class Jarvis {
   private history: Message[] = [];
   private pending: Pending | null = null;
@@ -265,9 +279,11 @@ export class Jarvis {
   private awaitingProject = false;
   // A coding request made with no project open, waiting to be sent once one is.
   private waitingTask: string | null = null;
+  // "A new project" was asked for with no name, so the next thing said is the name.
+  private awaitingName = false;
 
   constructor(ctx: Context = { dryRun: false }, memory: Memory | null = null) {
-    this.ctx = ctx;
+    this.ctx = memory ? { ...ctx, reminders: ctx.reminders ?? memory } : ctx;
     this.memory = memory;
   }
 
@@ -416,8 +432,8 @@ Rewritten:`);
       const result = await tool.run(call.args, this.ctx);
       if (result.needsApproval) {
         this.pending = result.needsApproval;
-        const { command, level } = result.needsApproval;
-        const ask = level === "confirm"
+        const { command, level, title } = result.needsApproval;
+        const ask = title ? `${title.replace(/\?$/, ", sir?")} Say confirm to go ahead.` : level === "confirm"
           ? `This one is dangerous, sir: ${command}. Say confirm to run it.`
           : `I'll run: ${command}. Shall I go ahead, sir?`;
         return { say: ask, source, tool: call.tool, pending: result.needsApproval, ms: Date.now() - begin };
@@ -493,7 +509,12 @@ Rewritten:`);
     return reply;
   }
 
-  private async respond(said: string): Promise<Reply> {
+  private async respond(original: string): Promise<Reply> {
+    const { rest: said, askedAfterHim } = splitGreeting(original);
+    if (said !== original) {
+      const reply = await this.respond(said);
+      return askedAfterHim ? { ...reply, say: `Very well. ${reply.say}`, spoken: reply.spoken ? `Very well. ${reply.spoken}` : undefined } : reply;
+    }
     const begin = Date.now();
     if (/^(jarvis,? )?(stop|cancel|never ?mind)[.!]?$/i.test(said.trim()) && this.pending) {
       this.pending = null;
@@ -533,6 +554,22 @@ Rewritten:`);
         return { say: answer, source: "fast", tool: "memory", ms: Date.now() - begin };
       }
     }
+
+    if (this.awaitingName) {
+      this.awaitingName = false;
+      if (/^(cancel|never ?mind|forget it|no)$/i.test(clean(said))) return this.finish(said, "Very good, sir.", "fast", begin);
+      const name = clean(said).replace(/^(call it|name it|it'?s called|called|named)\s+/i, "");
+      return this.runTool({ tool: "create_project", args: { name } }, "fast", said, begin);
+    }
+    const wantsProject = this.ctx.claude ? newProjectRequest(clean(said)) : null;
+    if (wantsProject?.name) return this.runTool({ tool: "create_project", args: { name: wantsProject.name } }, "fast", said, begin);
+    if (wantsProject) {
+      this.awaitingName = true;
+      return { ...this.finish(said, "What shall we call it, sir?", "fast", begin), listen: true };
+    }
+    // These rules are exact, so they come before anything that has to guess.
+    const ability = abilityCall(clean(said));
+    if (ability) return this.runTool(ability, "fast", said, begin);
 
     const projects = this.projectNames();
     const mentioned = projectInSentence(clean(said), projects);

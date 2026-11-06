@@ -6,13 +6,14 @@ import { test } from "node:test";
 
 import { DatabaseSync } from "node:sqlite";
 
-import { isStatementAboutSelf, Jarvis, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
+import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
+import { isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { readMenu, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
-import { claudeShortcut, findProject, projectInSentence, projectIntent } from "./projects.ts";
+import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
-import { describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
+import { findArgs, inYourWords, rankFiles, reminderMessage, describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
 import { spokenForm } from "./voice.ts";
 import { answerPrompt, siteName, topResults } from "./web.ts";
 import { decodeReply, knownAction, pickWindow } from "./windows.ts";
@@ -96,7 +97,7 @@ test("fast path leaves real questions and coding work to the model", () => {
   for (const said of [
     "Tell me a joke", "who wrote Hamlet", "add dark mode to the settings page", "fix the login bug",
     "let's start coding my Luminelle project", "open the portfolio project in claude", "how are you today",
-    "what is the capital of Japan", "install docker", "start a new session", "open resido in claude",
+    "what is the capital of Japan", "start a new session", "open resido in claude",
   ]) assert.equal(fastPath(said), null, said);
 });
 
@@ -775,4 +776,168 @@ test("answering which project with jarvis opens the Jarvis project, and his name
   const reply = await new Jarvis({ dryRun: false, claude, projects: () => names }).handle("jarvis");
   assert.equal(reply.say, "Yes, sir?");
   assert.equal(reply.listen, true);
+});
+
+test("what the audit got wrong now reaches the right ability", () => {
+  const cases: [string, string][] = [
+    ["set a timer for 5 minutes", "set_reminder"], ["5 minute timer", "set_reminder"], ["remind me in 10 minutes to call my mother", "set_reminder"],
+    ["remind me at 3pm to take my medicine", "set_reminder"], ["wake me up at 7", "set_reminder"], ["show my reminders", "list_reminders"], ["cancel my timer", "clear_reminders"],
+    ["what's 15 percent of 240", "say"], ["what is 128 times 47", "say"], ["what can you do", "say"],
+    ["take a screenshot", "screenshot"], ["lock my computer", "lock_screen"], ["shut down the computer", "power"], ["restart the computer", "power"], ["go to sleep", "power"], ["empty the trash", "power"],
+    ["turn off the wifi", "radio"], ["turn on bluetooth", "radio"], ["make the screen brighter", "brightness"], ["set brightness to 40", "brightness"], ["switch to dark mode", "color_scheme"],
+    ["open my downloads folder", "open_folder"], ["find my resume", "find_file"], ["where is my cv file", "find_file"], ["make a folder called invoices on my desktop", "create_item"],
+    ["what's on my clipboard", "clipboard"], ["copy hello to the clipboard", "clipboard"], ["what's my ip address", "my_ip"], ["what's playing", "now_playing"],
+    ["play lofi on youtube", "youtube"], ["search youtube for cats", "youtube"], ["minimize everything", "minimize_all"], ["what's on my calendar", "say"], ["read my emails", "say"], ["send an email to my boss", "say"],
+    ["install spotify", "run_command"], ["update my system", "run_command"],
+  ];
+  for (const [said, tool] of cases) assert.equal(abilityCall(said)?.tool, tool, said);
+});
+
+test("ordinary sentences and code requests aren't taken as abilities", () => {
+  for (const said of ["add a timer to the page", "fix the dark mode toggle", "add email validation", "why is my screen so dim", "should I go to sleep", "tell me a joke", "how are you", "open firefox", "write a function that adds 2 and 3", "turn off the lights", "what is love", "who won the game"]) {
+    assert.equal(abilityCall(said), null, said);
+  }
+});
+
+test("lengths of time and clock times are understood", () => {
+  assert.equal(parseDelay("for 5 minutes"), 300);
+  assert.equal(parseDelay("an hour and 30 minutes"), 5400);
+  assert.equal(parseDelay("half an hour"), 1800);
+  assert.equal(parseDelay("ten seconds"), 10);
+  assert.equal(parseDelay("soon"), null);
+  assert.equal(describeLength(5400), "1 hour and 30 minutes");
+  const now = new Date(2026, 10, 6, 12, 0);
+  const at = (hour: number, day = 6) => new Date(2026, 10, day, hour, 0).getTime();
+  assert.equal(parseClock("at 3pm", now), at(15));
+  assert.equal(parseClock("at 3 p.m.", now), at(15));
+  assert.equal(parseClock("at 9am", now), at(9, 7));
+  assert.equal(parseClock("at 7", now), at(19));
+  assert.equal(parseClock("at 7", now, true), at(7, 7));
+  assert.equal(parseClock("at 15:00", now), at(15));
+  assert.equal(parseClock("tomorrow at 3pm", now), at(15, 7));
+  assert.equal(parseClock("at noon", new Date(2026, 10, 6, 9)), at(12));
+  assert.equal(parseClock("at 45", now), null);
+  assert.equal(parseClock("whenever", now), null);
+});
+
+test("sums are worked out, not guessed, and nothing else can run", () => {
+  assert.equal(calculate("what's 15 percent of 240"), 36);
+  assert.equal(calculate("128 times 47"), 6016);
+  assert.equal(calculate("what is (2 + 3) * 4"), 20);
+  assert.equal(calculate("10 divided by 4"), 2.5);
+  assert.equal(calculate("1,000 plus 1"), 1001);
+  assert.equal(calculate("process.exit(1)"), null);
+  assert.equal(calculate("2 + alert(1)"), null);
+  assert.equal(calculate("just 5"), null);
+  assert.equal(calculate("1 / 0"), null);
+});
+
+test("a reminder keeps its words, and goes off once", () => {
+  const now = new Date(2026, 10, 6, 12, 0);
+  const call = abilityCall("remind me in 10 minutes to call my mother", now)!;
+  assert.equal(call.args.text, "call my mother");
+  assert.equal(Number(call.args.due), now.getTime() + 600_000);
+  assert.equal(abilityCall("remind me at 3pm to take my medicine", now)!.args.text, "take my medicine");
+  assert.equal(abilityCall("remind me to call my mother in 2 hours", now)!.args.text, "call my mother");
+  assert.equal(abilityCall("remind me to call home", now)!.tool, "say");
+  assert.equal(inYourWords("call my mother"), "call your mother");
+  assert.equal(reminderMessage("reminder", "call my mother", 1000, 1000), "A reminder, sir: call your mother.");
+  assert.equal(reminderMessage("timer", "5 minutes", 1000, 1000), "Your 5 minute timer is up, sir.");
+  assert.match(reminderMessage("alarm", "", 0, 3_600_000), /so this is late/);
+  const memory = new Memory(":memory:");
+  memory.addReminder("timer", "5 minutes", 1000);
+  memory.addReminder("timer", "1 hour", 9000);
+  assert.deepEqual(memory.takeDueReminders(2000).map((item) => item.text), ["5 minutes"]);
+  assert.deepEqual(memory.takeDueReminders(2000), []);
+  assert.equal(memory.reminders().length, 1);
+  assert.equal(memory.clearReminders(), 1);
+});
+
+test("power actions always wait for a clear confirm", async () => {
+  const jarvis = new Jarvis({ dryRun: true });
+  const reply = await jarvis.handle("shut down the computer");
+  assert.equal(reply.pending?.command, "systemctl poweroff");
+  assert.equal(reply.pending?.level, "confirm");
+  assert.equal((await jarvis.handle("yes")).pending?.level, "confirm");
+  assert.match((await jarvis.handle("cancel")).say, /^Cancelled/);
+});
+
+test("the model can't pick a tool the words don't support", () => {
+  assert.ok(!toolFitsWords("close_project", "lock my computer"));
+  assert.ok(!toolFitsWords("set_volume", "set brightness to 40"));
+  assert.ok(!toolFitsWords("system_info", "update my system"));
+  assert.ok(toolFitsWords("close_project", "I'm finished coding for today"));
+  assert.ok(toolFitsWords("set_volume", "make it louder, set the sound to 70"));
+  assert.ok(toolFitsWords("system_info", "is my laptop charging"));
+  assert.ok(toolFitsWords("media_control", "skip this track"));
+});
+
+test("a new project is understood from how people actually ask", () => {
+  for (const said of ["i wish to start new project called Quje", "create a new project called Quje", "start a new project named Quje", "new project Quje", "make a new web project called Quje"]) {
+    assert.deepEqual(newProjectRequest(said), { name: "Quje" }, said);
+  }
+  for (const said of ["I want to start a new project", "new project", "let's create a project", "start a new project for my client"]) assert.deepEqual(newProjectRequest(said), { name: null }, said);
+  for (const said of ["add a new project page", "open project luminelle", "add a new project card to the list of projects"]) assert.equal(newProjectRequest(said), null, said);
+  assert.ok(validProjectName("Quje"));
+  assert.ok(validProjectName("my-app 2"));
+  for (const name of ["../etc", "a/b", ".hidden", "", "a..b"]) assert.ok(!validProjectName(name), name);
+});
+
+test("your exact message: a greeting, his name, and a new project", async () => {
+  const started: string[] = [];
+  const claude = { openProject: null as string | null, start(project: string) { started.push(project); }, ask: () => true, close() {} };
+  const jarvis = new Jarvis({ dryRun: true, claude, projects: () => ["HaaLSO's JARVIS", "luminelle"] });
+  const reply = await jarvis.handle("How are you jarvis?\ni wish to start new project called Quje");
+  assert.equal(reply.tool, "create_project");
+  assert.equal(reply.say, "Very well. Quje is created, sir. Opening Claude in it.");
+  const asked = await jarvis.handle("I want to start a new project");
+  assert.equal(asked.say, "What shall we call it, sir?");
+  assert.equal((await jarvis.handle("Quje")).tool, "create_project");
+});
+
+test("his name in a greeting isn't the Jarvis project, but asking for it still is", () => {
+  const names = ["HaaLSO's JARVIS", "luminelle"];
+  assert.equal(projectInSentence("how are you jarvis i wish to start new project", names), null);
+  assert.equal(projectInSentence("open firefox jarvis", names), null);
+  for (const said of ["start coding jarvis", "work on jarvis", "open the jarvis project", "project jarvis", "HaaLSO's JARVIS project"]) assert.equal(projectInSentence(said, names), "HaaLSO's JARVIS", said);
+  assert.deepEqual(splitGreeting("hello, open firefox"), { rest: "open firefox", askedAfterHim: false });
+  assert.deepEqual(splitGreeting("how are you"), { rest: "how are you", askedAfterHim: false });
+  assert.equal(splitGreeting("hello world app").rest, "hello world app");
+});
+
+test("searching for a file can't be turned into a different command", () => {
+  const args = findArgs("/home/x", "my resume*; rm -rf /");
+  assert.equal(args.at(-2), "*my*resume;*rm*-rf*/*");
+  assert.equal(args[0], "/home/x");
+});
+
+test("found files put real, personal matches first", () => {
+  const home = "/home/x";
+  const files = ["/home/x/code/recv.c", "/home/x/Documents/Projects/a/cv.ts", "/home/x/Downloads/my cv.pdf"];
+  assert.deepEqual(rankFiles(files, "cv", home), ["/home/x/Downloads/my cv.pdf", "/home/x/Documents/Projects/a/cv.ts"]);
+  assert.deepEqual(rankFiles(["/home/x/code/recv.c"], "cv", home), ["/home/x/code/recv.c"]);
+});
+
+test("an article doesn't stop a program being found", () => {
+  const apps = [{ name: "Terminal", path: "/t.desktop", bin: "ptyxis" }];
+  assert.equal(findApp("a terminal", apps)?.name, "Terminal");
+  assert.equal(findApp("the terminal", apps)?.name, "Terminal");
+});
+
+test("a power request asks in plain words", async () => {
+  const reply = await new Jarvis({ dryRun: true }).handle("restart the computer");
+  assert.equal(reply.say, "Shall I restart the computer, sir? Say confirm to go ahead.");
+  assert.equal(reply.pending?.title, "Shall I restart the computer?");
+});
+
+test("notes work with memory, and timers are really stored", async () => {
+  const memory = new Memory(":memory:");
+  const jarvis = new Jarvis({ dryRun: false }, memory);
+  assert.equal((await jarvis.handle("take a note buy milk")).say, "I'll remember that, sir.");
+  assert.match((await jarvis.handle("what are my notes")).say, /buy milk/);
+  assert.equal((await jarvis.handle("set a timer for 5 minutes")).say, "Timer set for 5 minutes, sir.");
+  assert.equal(memory.reminders().length, 1);
+  assert.match((await jarvis.handle("what timers do i have")).say, /5 minute timer/);
+  assert.equal((await jarvis.handle("cancel my timer")).say, "All cancelled, sir.");
+  assert.equal(memory.reminders().length, 0);
 });

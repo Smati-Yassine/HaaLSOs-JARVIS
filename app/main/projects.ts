@@ -54,7 +54,9 @@ const COMMON_WORDS = new Set([
 // Finds a project named anywhere in a sentence, tolerating speech mistakes.
 export function projectInSentence(said: string, names: string[]): string | null {
   // "open firefox jarvis" is talking to Jarvis. "start coding jarvis" means the project.
-  const aboutCode = /\b(cod(e|ing)|work(ing)?|project)\b/i.test(said);
+  // "How are you jarvis, I want a new project" is only talking to him, so the name has to sit
+  // right next to the work.
+  const aboutCode = /\b(cod(e|ing)|work(ing)?|project|on|in)\s+((on|in|with)\s+)?(the\s+|my\s+)?jarvis\b|\bjarvis('?s)?\s+(project|code|repo|folder)\b/i.test(said);
   const words = said.toLowerCase().replace(/[^a-z0-9' -]/g, " ").split(/\s+/).filter((word) => word && (aboutCode || word !== "jarvis"));
   for (let size = 3; size >= 1; size--) {
     for (let at = 0; at + size <= words.length; at++) {
@@ -98,4 +100,16 @@ export function claudeShortcut(said: string, names: string[]): { home: true } | 
   if (!rest || /^(~|home|(my |the )?home folder)$/i.test(rest)) return { home: true };
   const project = rest.split(/\s+/).length <= 4 ? findProject(rest, names) : null;
   return project ? { project } : null;
+}
+
+// A folder name that's safe to create: no slashes, no dots at the front, nothing odd.
+export const validProjectName = (name: string) => /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,60}$/u.test(name) && !name.includes("..");
+
+// "I wish to start a new project called Quje". The name is null if none was given.
+export function newProjectRequest(said: string): { name: string | null } | null {
+  if (!/\bnew\s+(?:[\p{L}-]+\s+)?project\b|\b(create|make|begin)\s+(?:a\s+)?project\b/iu.test(said)) return null;
+  if (/\b(page|section|card|button|folder in|tab|menu|modal|form|list of)\b/i.test(said)) return null;
+  const tail = said.match(/\b(?:called|named|name it|call it|titled)\s+(.+)$/i)?.[1] ?? said.match(/\bproject\s+(?!for\b|about\b|to\b|with\b)(\S+(?:\s+\S+){0,2})$/i)?.[1] ?? null;
+  const name = tail?.replace(/^["']|["'.,!?]+$/g, "").replace(/\s+please$/i, "").trim() ?? null;
+  return { name: name || null };
 }

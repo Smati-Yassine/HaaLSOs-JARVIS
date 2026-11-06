@@ -11,6 +11,7 @@ type Row = Record<string, unknown>;
 export type Chat = { id: number; title: string; updated: number; turns: number };
 export type Turn = { role: "user" | "jarvis"; text: string };
 export type Fact = { id: number; text: string };
+export type Reminder = { kind: string; text: string; due: number };
 
 export const containsSecret = (text: string) => SECRET.test(text);
 
@@ -56,6 +57,7 @@ export class Memory {
       CREATE TRIGGER IF NOT EXISTS turns_del AFTER DELETE ON turns BEGIN
         INSERT INTO turns_search(turns_search, rowid, text) VALUES ('delete', old.id, old.text); END;
       CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY, title TEXT NOT NULL, updated INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, due INTEGER NOT NULL);
     `);
     if (reindex) this.rebuildSearch();
     const columns = this.db.prepare("PRAGMA table_info(turns)").all() as Row[];
@@ -83,6 +85,26 @@ export class Memory {
     const known = this.db.prepare("SELECT 1 FROM facts WHERE LOWER(text) = LOWER(?)").get(text);
     if (!known) this.db.prepare("INSERT INTO facts (text, created) VALUES (?, ?)").run(text, now);
     return true;
+  }
+
+  addReminder(kind: string, text: string, due: number) {
+    this.db.prepare("INSERT INTO reminders (kind, text, due) VALUES (?, ?, ?)").run(kind, text, due);
+  }
+
+  reminders(): Reminder[] {
+    const rows = this.db.prepare("SELECT kind, text, due FROM reminders ORDER BY due").all() as Row[];
+    return rows.map((row) => ({ kind: String(row.kind), text: String(row.text), due: Number(row.due) }));
+  }
+
+  clearReminders(): number {
+    return Number(this.db.prepare("DELETE FROM reminders").run().changes);
+  }
+
+  // Hands over what's due and removes it, so each one only ever goes off once.
+  takeDueReminders(now = Date.now()): Reminder[] {
+    const rows = this.db.prepare("SELECT kind, text, due FROM reminders WHERE due <= ? ORDER BY due").all(now) as Row[];
+    this.db.prepare("DELETE FROM reminders WHERE due <= ?").run(now);
+    return rows.map((row) => ({ kind: String(row.kind), text: String(row.text), due: Number(row.due) }));
   }
 
   allFacts(): Fact[] {
@@ -247,7 +269,7 @@ export function memoryCommand(text: string, memory: Memory, now = new Date()): s
   const lower = text.toLowerCase().replace(/[.!?]+$/, "");
   let match: RegExpMatchArray | null;
 
-  if ((match = text.match(/^(?:please )?(?:remember|don'?t forget|note)(?: that)?[,:]?\s+(.+?)[.!]?$/i))) {
+  if ((match = text.match(/^(?:please )?(?:remember|don'?t forget|note|take a note|make a note|write down|jot down)(?: that| of)?[,:]?\s+(.+?)[.!]?$/i))) {
     if (!memory.remember(match[1])) return "I won't store passwords or keys, sir. They're safer in a password manager.";
     return "I'll remember that, sir.";
   }
@@ -259,7 +281,7 @@ export function memoryCommand(text: string, memory: Memory, now = new Date()): s
     const removed = memory.forget(match[1]);
     return removed ? `Forgotten, sir. I removed ${removed} ${removed === 1 ? "item" : "items"}.` : `I don't have anything about ${match[1]}, sir.`;
   }
-  if (/^what do you (know|remember)( about me)?$/.test(lower)) {
+  if (/^(what do you (know|remember)( about me)?|what are my notes|(show|read)( me)? my notes)$/.test(lower)) {
     const facts = memory.facts(5);
     return facts.length ? `I remember this, sir: ${facts.join(". ")}.` : "You haven't asked me to remember anything yet, sir.";
   }

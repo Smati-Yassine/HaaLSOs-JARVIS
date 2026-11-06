@@ -2,7 +2,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
+import { spawn } from "node:child_process";
+
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, session } from "electron";
 
 import { Jarvis, pruneLog, summarize, unloadModel, type Pending, type Reply } from "./brain.ts";
 import { ClaudeManager, type Gate } from "./claude.ts";
@@ -11,6 +13,7 @@ import { Memory } from "./memory.ts";
 import { classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { healthCheck, setStartAtLogin, startsAtLogin } from "./system.ts";
 import { Voice, type VoiceEvent } from "./voice.ts";
+import { reminderMessage } from "./tools.ts";
 import { startSearch, stopSearch } from "./web.ts";
 
 // Matches the app menu entry, so the dock groups this window under Jarvis's icon.
@@ -32,6 +35,7 @@ const memory = new Memory(process.env.JARVIS_MEMORY || join(homedir(), ".Jarvis"
 const jarvis = new Jarvis({
   dryRun: process.env.JARVIS_DRY_RUN === "1",
   ack: (words) => voice?.say(words), // Searching takes seconds, so Jarvis says so first.
+  clipboard: { read: () => clipboard.readText(), write: (text) => clipboard.writeText(text) },
 }, memory);
 let window: BrowserWindow | null = null;
 let voice: Voice | null = null;
@@ -240,6 +244,16 @@ function closeClaude() {
   claude.closeProject();
 }
 
+// Goes off through the desktop too, in case Jarvis is hidden behind something.
+function sayDueReminders() {
+  for (const item of memory.takeDueReminders()) {
+    const message = reminderMessage(item.kind, item.text, item.due);
+    announce(message);
+    const note = spawn("notify-send", ["--urgency=critical", "Jarvis", message], { stdio: "ignore" });
+    note.on("error", () => {});
+  }
+}
+
 function speakReply(reply: Reply) {
   voice?.say(reply.spoken ?? reply.say, Boolean(reply.pending || reply.listen));
 }
@@ -391,6 +405,8 @@ app.whenReady().then(() => {
     if (engine.start()) voice = engine;
   }
   createWindow();
+  // Waits for the window, so anything missed while closed appears after the welcome.
+  setTimeout(() => setInterval(sayDueReminders, 2000).unref(), 8000).unref();
 });
 
 // Stop the microphone, end Claude's terminals, and free the graphics card when Jarvis closes.

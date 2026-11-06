@@ -1,5 +1,6 @@
 // Plain commands that never need the AI model, so they answer in milliseconds.
 // Anything ambiguous returns null and goes to the model instead.
+import { abilityCall } from "./abilities.ts";
 
 export type Call = { tool: string; args: Record<string, string> };
 
@@ -32,6 +33,9 @@ export function fastPath(said: string): Call | null {
   const text = clean(said);
   const lower = text.toLowerCase();
   let match: RegExpMatchArray | null;
+
+  const ability = abilityCall(text);
+  if (ability) return ability;
 
   if (/^(what('s| is) the time|what time is it|time|the time)$/.test(lower)) return { tool: "get_time", args: {} };
   if (/^(what('s| is) (the date|today'?s date)|what day is it)$/.test(lower)) {

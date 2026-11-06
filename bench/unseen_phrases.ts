@@ -42,7 +42,7 @@ const CASES: [string, string | null][] = [
   ["shut the project down", "close_project"],
   ["how big is my downloads folder", "folder_info"],
   ["install htop", "run_command"],
-  ["make a folder called invoices in my documents", "run_command"],
+  ["make a folder called invoices in my documents", "create_item"],
   ["tell me something funny", null],
   ["what's the speed of light", null],
   ["who painted the Mona Lisa", null],
