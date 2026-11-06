@@ -1,5 +1,6 @@
 // Runs the real Claude Code in real terminals, and hears what it does through its official
-// hooks and status line. Jarvis never reads your login, and never answers a prompt by itself.
+// hooks and status line. Jarvis never reads your login. The only prompts it answers by itself are
+// a folder you already said yes to, and resuming a session you just clicked.
 import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -169,7 +170,7 @@ export type Gate = "trust" | "bypass";
 export type Permission = { session: string; command: string; shell: boolean; menu: Menu | null };
 export type Question = { question: string; options: string[]; simple: boolean };
 
-type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number };
+type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number; resumeHandled: boolean };
 type Stored = { id: string; title: string; archived: boolean; updated: number };
 
 type Listeners = {
@@ -181,6 +182,9 @@ type Listeners = {
   settled(session: string): void;
   finished(session: string, message: string): void;
   gate(project: string, gate: Gate): void;
+  // A question Jarvis was asking got answered in the terminal, or its session went away.
+  gateCleared(gate: Gate): void;
+  notice(text: string): void;
 };
 
 // Which answer the trust menu has selected, read from the latest screen.
@@ -224,6 +228,14 @@ export function readMenu(lines: string[]): Menu | null {
   };
 }
 
+// Claude's question when reopening an old or long session. Returns what continuing would cost,
+// from the screen with all spaces removed, or null if this isn't that question.
+export function resumeCost(screen: string): { asked: boolean; cost: string | null } {
+  if (!/Resumethisconversation\?/i.test(screen)) return { asked: false, cost: null };
+  const found = screen.match(/willuseabout(\d+%)ofyour([\w-]+?)usagelimit/i);
+  return { asked: true, cost: found ? `${found[1]} of your ${found[2]} limit` : null };
+}
+
 function describe(tool: string, input: Record<string, unknown>): { text: string; shell: boolean } {
   if (tool === "Bash") return { text: String(input.command ?? ""), shell: true };
   const target = input.file_path ?? input.notebook_path ?? input.url ?? input.pattern ?? input.path;
@@ -242,23 +254,32 @@ export class ClaudeManager {
   private cols = 100;
   private rows = 30;
   private bypass = false;
+  // Folders the user has said yes to. Claude doesn't save this for the home folder, so without
+  // this list it would ask on every launch.
+  private trusted = new Set<string>();
   private watcher: ReturnType<typeof setInterval> | null = null;
   private readonly on: Listeners;
 
   constructor(listeners: Listeners) {
     this.on = listeners;
     try {
-      this.bypass = JSON.parse(readFileSync(PREFERENCES, "utf8")).bypass === true;
+      const saved = JSON.parse(readFileSync(PREFERENCES, "utf8"));
+      this.bypass = saved.bypass === true;
+      this.trusted = new Set(Array.isArray(saved.trusted) ? saved.trusted.map(String) : []);
     } catch {
       // No saved choice yet, so Claude keeps asking.
     }
   }
 
+  private savePreferences() {
+    mkdirSync(HOME, { recursive: true, mode: 0o700 });
+    writeFileSync(PREFERENCES, JSON.stringify({ bypass: this.bypass, trusted: [...this.trusted] }), { mode: 0o600 });
+  }
+
   // Applies to sessions from now on, and to idle ones straight away. A busy one finishes first.
   setBypass(on: boolean) {
     this.bypass = on;
-    mkdirSync(HOME, { recursive: true, mode: 0o700 });
-    writeFileSync(PREFERENCES, JSON.stringify({ bypass: on }), { mode: 0o600 });
+    this.savePreferences();
     for (const session of this.sessions.values()) if (session.pty) this.relaunch(session);
     this.changed();
   }
@@ -341,7 +362,8 @@ export class ClaudeManager {
       case "SessionStart":
         if (session) {
           session.ready = true;
-          session.needsTrust = false;
+          // Still waiting on a question means it was answered in the terminal.
+          this.gateAnswered(session);
           for (const prompt of session.queued.splice(0)) this.type(session, prompt);
         }
         break;
@@ -407,18 +429,10 @@ export class ClaudeManager {
 
   // These menus start on "No, exit". Keys sent before one is ready get lost, and Enter would then
   // choose No, so Enter is only pressed once the screen shows Yes selected.
-  answerGate(allow: boolean, onFail?: () => void) {
-    const session = [...this.sessions.values()].find((item) => item.needsTrust);
-    if (!session?.pty) return;
+  private pressYes(session: Session, onFail?: () => void) {
     const gate = session.gate;
     session.needsTrust = false;
     session.gate = null;
-    if (!allow) {
-      // Refusing the bypass warning only means going back to asking, not losing the project.
-      if (gate === "bypass") this.setBypass(false);
-      else this.closeProject();
-      return;
-    }
     let tries = 0;
     const step = () => {
       if (!session.pty || session.ready) return;
@@ -437,7 +451,48 @@ export class ClaudeManager {
       setTimeout(step, 400);
     };
     setTimeout(step, 400);
+  }
+
+  private waitingOn(gate: Gate) {
+    return [...this.sessions.values()].filter((session) => session.needsTrust && session.gate === gate && session.pty);
+  }
+
+  private rememberFolder() {
+    if (!this.path || this.trusted.has(this.path)) return;
+    this.trusted.add(this.path);
+    this.savePreferences();
+  }
+
+  // The user answered through Jarvis. One answer covers every session waiting on that question.
+  answerGate(gate: Gate, allow: boolean, onFail?: () => void) {
+    const waiting = this.waitingOn(gate);
+    if (!allow) {
+      for (const session of waiting) {
+        session.needsTrust = false;
+        session.gate = null;
+      }
+      // Refusing the bypass warning only means going back to asking, not losing the project.
+      if (gate === "bypass") this.setBypass(false);
+      else this.closeProject();
+      return;
+    }
+    if (gate === "trust") this.rememberFolder();
+    for (const session of waiting) this.pressYes(session, onFail);
     this.changed();
+  }
+
+  // The question moved on without Jarvis: answered in the terminal, or the session ended.
+  private gateAnswered(session: Session, accepted = true) {
+    const gate = session.gate;
+    session.needsTrust = false;
+    session.gate = null;
+    if (!gate) return;
+    if (accepted && gate === "trust") this.rememberFolder();
+    if (this.waitingOn(gate).length) {
+      if (accepted) for (const other of this.waitingOn(gate)) this.pressYes(other);
+      else return;
+    }
+    this.on.gateCleared(gate);
   }
 
   // What Claude's screen shows right now, as a person would see it.
@@ -509,28 +564,13 @@ export class ClaudeManager {
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
       session.screen?.write(data);
       this.on.data(session.id, data);
-      // Claude asks these before it starts. The user answers through Jarvis.
-      if (session.kind === "claude" && !session.ready && !session.needsTrust) {
-        const screen = session.buffer.slice(-6000).replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g, "").replace(/\s/g, "");
-        const ask = (gate: Gate) => {
-          session.needsTrust = true;
-          session.gate = gate;
-          this.changed();
-          if (this.project) this.on.gate(this.project, gate);
-        };
-        if (!session.trustAsked && /Yes,?Itrustthisfolder/i.test(screen)) {
-          session.trustAsked = true;
-          ask("trust");
-        } else if (!session.bypassAsked && /Yes,?Iaccept/i.test(screen)) {
-          session.bypassAsked = true;
-          ask("bypass");
-        }
-      }
+      if (session.kind === "claude") this.watchStartup(session);
     });
     pty.onExit(() => {
       if (session.pty !== pty) return;
       session.pty = null;
       session.working = false;
+      if (session.gate) this.gateAnswered(session, false);
       if (session.kind === "shell") {
         this.sessions.delete(session.id);
         if (this.active === session.id) this.active = [...this.sessions.keys()][0] ?? null;
@@ -539,11 +579,49 @@ export class ClaudeManager {
     });
   }
 
+  // Claude can ask things before it starts. Reads the screen for them as it's drawn.
+  private watchStartup(session: Session) {
+    const screen = session.buffer.slice(-6000).replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g, "").replace(/\s/g, "");
+    if (!session.resumeHandled) {
+      const { asked, cost } = resumeCost(screen);
+      if (asked) {
+        session.resumeHandled = true;
+        // Clicking the session already answered this, and nothing is spent until a message is sent.
+        setTimeout(() => {
+          if (this.menu(session.id)?.options[0] === "Resume") session.pty?.write("\r");
+          this.on.notice(cost ? `That conversation is a long one, sir. Your next message in it will use about ${cost}.` : "That conversation is a long one, sir, so your next message in it will use more of your limit.");
+        }, 400);
+      }
+    }
+    if (session.ready) return;
+    const ask = (gate: Gate) => {
+      session.needsTrust = true;
+      session.gate = gate;
+      // Already said yes to this folder, so there's no need to ask again.
+      if (gate === "trust" && this.path && this.trusted.has(this.path)) {
+        this.pressYes(session);
+        return;
+      }
+      this.changed();
+      if (this.project) this.on.gate(this.project, gate);
+    };
+    // The next question showing means the last one was answered in the terminal.
+    if (session.gate === "trust" && /Yes,?Iaccept/i.test(screen)) this.gateAnswered(session);
+    if (session.needsTrust) return;
+    if (!session.trustAsked && /Yes,?Itrustthisfolder/i.test(screen)) {
+      session.trustAsked = true;
+      ask("trust");
+    } else if (!session.bypassAsked && /Yes,?Iaccept/i.test(screen)) {
+      session.bypassAsked = true;
+      ask("bypass");
+    }
+  }
+
   private blank(id: string, kind: Session["kind"], title: string): Session {
     return {
       id, kind, title, state: "running", working: false, needsTrust: false, model: null, effort: null, context: null,
       tokens: null, minutes: 0, elsewhere: false, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, bypassAsked: false, gate: null, leftoverInput: false,
-      screen: kind === "claude" ? new headless.Terminal({ cols: this.cols, rows: this.rows, scrollback: 0, allowProposedApi: true }) : null, askSeq: 0,
+      screen: kind === "claude" ? new headless.Terminal({ cols: this.cols, rows: this.rows, scrollback: 0, allowProposedApi: true }) : null, askSeq: 0, resumeHandled: false,
     };
   }
 
@@ -552,7 +630,16 @@ export class ClaudeManager {
     args.push(...(resume ? ["--resume", session.id] : ["--session-id", session.id]));
     if (session.model) args.push("--model", session.model);
     if (session.effort) args.push("--effort", session.effort);
+    // A fresh start: old text on the screen must not be mistaken for a new question.
     session.ready = false;
+    session.trustAsked = false;
+    session.bypassAsked = false;
+    session.resumeHandled = false;
+    session.needsTrust = false;
+    session.gate = null;
+    session.buffer = "";
+    session.screen?.reset();
+    this.on.data(session.id, "\x1b[2J\x1b[3J\x1b[H");
     this.spawnInto(session, "claude", args);
   }
 
@@ -638,7 +725,8 @@ export class ClaudeManager {
     const session = this.sessions.get(id);
     if (!session || session.state === "archived" || session.elsewhere) return;
     this.active = id;
-    if (session.kind === "claude" && !session.pty) this.launchClaude(session, true);
+    // A session nothing was ever said in has no conversation to resume.
+    if (session.kind === "claude" && !session.pty) this.launchClaude(session, session.title !== "New session");
     this.changed();
   }
 
@@ -739,9 +827,6 @@ export class ClaudeManager {
     const pty = session.pty;
     session.pty = null;
     pty?.kill();
-    session.buffer = "";
-    session.screen?.reset();
-    this.on.data(session.id, "\x1b[2J\x1b[3J\x1b[H");
     // A session that hasn't been used yet has no conversation to resume.
     this.launchClaude(session, session.title !== "New session");
     this.changed();

@@ -94,12 +94,26 @@ const claude = new ClaudeManager({
     const summary = await summarize(message);
     announce(summary ? `Claude has finished, sir. ${summary}` : "Claude has finished, sir.");
   },
+  gateCleared: (gate) => dropGate(gate),
+  notice: (text) => announce(text),
   gate(project, gate) {
+    // Several sessions can reach the same question. One answer covers them all.
+    if (permissions.some((item) => item.gate === gate)) return;
     const options = gate === "bypass" ? ["Yes, I accept", "No, keep asking me"] : ["Yes, trust this folder", "No, close it"];
     permissions.unshift({ session: "", command: project, level: "say-back", gate, options });
     askPermission();
   },
 });
+
+function dropGate(gate: Gate) {
+  const at = permissions.findIndex((item) => item.gate === gate);
+  if (at < 0) return;
+  permissions.splice(at, 1);
+  if (at === 0) {
+    toWindow({ type: "settled" });
+    askPermission();
+  }
+}
 
 function announce(say: string, pending?: Pending, spoken = say) {
   const reply: Reply = { say, source: "tool", tool: "claude", pending, ms: 0 };
@@ -156,7 +170,7 @@ function settleAsking(next: Asking, pick: number | null): Reply {
   const answer = (say: string): Reply => ({ say, source: "fast", tool: "claude", ms: 0 });
   if (next.gate) {
     const allowed = pick === 0;
-    claude.answerGate(allowed, () => announce("Claude's question didn't respond, sir. Please choose Yes in its panel."));
+    claude.answerGate(next.gate, allowed, () => announce("Claude's question didn't respond, sir. Please choose Yes in its panel."));
     if (next.gate === "bypass") return answer(allowed ? "Understood, sir. Claude will no longer ask." : "Very good, sir. Claude will keep asking.");
     return answer(allowed ? "Thank you, sir. Claude is starting." : "Understood, sir. I've closed it.");
   }

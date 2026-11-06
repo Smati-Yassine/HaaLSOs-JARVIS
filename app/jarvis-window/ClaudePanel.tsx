@@ -195,7 +195,34 @@ export function ClaudePanel({ snap, mode, asking, onMinimize }: { snap: Snapshot
       </header>
       <div className="work">
         <nav className="side" aria-label="Sessions and terminals">
-          <div className="side-title">Claude sessions<button type="button" aria-label="New Claude session" onClick={() => window.claude.newSession()}>+</button></div>
+          <div className="side-title">
+            Claude sessions
+            <span className="side-actions">
+              <button
+                type="button"
+                className="archive-button"
+                aria-label={`${showArchived ? "Hide" : "Show"} archived sessions (${archived.length})`}
+                title={`${showArchived ? "Hide" : "Show"} archived (${archived.length})`}
+                aria-pressed={showArchived}
+                onClick={() => setShowArchived((value) => !value)}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1" /><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4" /></svg>
+                {archived.length > 0 && <small>{archived.length}</small>}
+              </button>
+              <button type="button" aria-label="New Claude session" title="New Claude session" onClick={() => window.claude.newSession()}>+</button>
+            </span>
+          </div>
+          {showArchived && (
+            <div className="archived-list">
+              {archived.length === 0 && <p>Nothing archived.</p>}
+              {archived.map((session) => (
+                <div key={session.id} className="archived">
+                  <span title={session.title}>{session.title}</span>
+                  <button type="button" onClick={() => window.claude.restore(session.id)}>Restore</button>
+                </div>
+              ))}
+            </div>
+          )}
           {claudes.map((session) => (
             <div key={session.id} className={`row ${session.id === snap.active ? "on" : ""}`}>
               <button
@@ -221,17 +248,6 @@ export function ClaudePanel({ snap, mode, asking, onMinimize }: { snap: Snapshot
                 <span className="name">{session.title}</span>
               </button>
               <button type="button" className="row-x" aria-label={`Close ${session.title}`} onClick={() => window.claude.archive(session.id)}>×</button>
-            </div>
-          ))}
-          {archived.length > 0 && (
-            <button type="button" className="archive-toggle" onClick={() => setShowArchived((value) => !value)}>
-              {showArchived ? "Hide" : "Show"} archived ({archived.length})
-            </button>
-          )}
-          {showArchived && archived.map((session) => (
-            <div key={session.id} className="archived">
-              <span title={session.title}>{session.title}</span>
-              <button type="button" onClick={() => window.claude.restore(session.id)}>Restore</button>
             </div>
           ))}
         </nav>

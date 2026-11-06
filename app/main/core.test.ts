@@ -10,7 +10,7 @@ import { askClaudeOnce, depthOf } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
-import { claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
+import { resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
@@ -1038,4 +1038,11 @@ test("ask claude with nothing open is a question, not a request for a project", 
   const reply = await jarvis.handle("ask claude about the history of Rome");
   assert.equal(reply.say, "An answer, sir.");
   assert.match(got, /He now says: the history of Rome/);
+});
+
+test("Claude's resume question is recognized, with what continuing costs", () => {
+  const screen = "Resume this conversation?\nThis conversation has been inactive for 1d 2h 55m and is 371.4k tokens long. Resuming\nit will use about 7% of your 5-hour usage limit.\n1. Resume".replace(/\s/g, "");
+  assert.deepEqual(resumeCost(screen), { asked: true, cost: "7% of your 5-hour limit" });
+  assert.deepEqual(resumeCost("Resumethisconversation?1.Resume"), { asked: true, cost: null });
+  assert.deepEqual(resumeCost("Noquestionhere"), { asked: false, cost: null });
 });

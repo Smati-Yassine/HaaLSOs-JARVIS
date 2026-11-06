@@ -199,7 +199,14 @@ kbd { display: inline-grid; place-items: center; min-width: 22px; height: 22px; 
 .dot.working { background: var(--amber); animation: pulse 1s infinite; }
 .glyph { font: 500 0.72rem/1 var(--mono); color: var(--good); }
 @keyframes pulse { 50% { opacity: 0.3; } }
-.archive-toggle { align-self: flex-start; margin: 10px 8px 2px; background: none; border: 0; padding: 0; font-size: 0.78rem; color: var(--mute); text-decoration: underline; text-underline-offset: 3px; }
+.side-actions { display: inline-flex; align-items: center; gap: 8px; }
+.archive-button { display: inline-flex; align-items: center; gap: 3px; }
+.side-title .archive-button { padding: 2px; border-radius: 4px; }
+.archive-button svg { width: 15px; height: 15px; }
+.archive-button small { font: 500 0.68rem/1 var(--mono); }
+.archive-button[aria-pressed="true"] { background: var(--lift); color: var(--ink); }
+.archived-list { margin: 0 0 6px; padding: 4px 0; background: var(--ground); border-radius: 6px; }
+.archived-list p { margin: 2px 8px; font-size: 0.8rem; color: var(--mute); }
 .archived { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 8px; font-size: 0.82rem; color: var(--mute); }
 .archived span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .archived button { flex: none; background: none; border: 0; padding: 2px 0; font-size: 0.76rem; color: var(--ink); }
