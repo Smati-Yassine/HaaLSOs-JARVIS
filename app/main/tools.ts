@@ -17,6 +17,8 @@ const BRAVE = "/snap/bin/brave";
 export type Args = Record<string, unknown>;
 export type Result = {
   say: string;
+  // When what's shown doesn't suit being read aloud, like terminal output.
+  spoken?: string;
   ok: boolean;
   // Set when a command must wait for the user before running.
   needsApproval?: { command: string; level: Level };
@@ -305,6 +307,60 @@ function systemInfo(args: Args): Result {
   return { ok: false, say: "I can check battery, CPU, memory, disk or network, sir." };
 }
 
+// ---- Folders and projects ---------------------------------------------------
+
+const FOLDERS: Record<string, string> = {
+  downloads: "Downloads", documents: "Documents", desktop: "Desktop", pictures: "Pictures",
+  music: "Music", videos: "Videos", home: "",
+};
+
+export function describeFolder(label: string, names: string[]): string {
+  const visible = names.filter((name) => !name.startsWith(".")).sort();
+  if (!visible.length) return `Your ${label} folder is empty, sir.`;
+  const count = `${visible.length} ${visible.length === 1 ? "item" : "items"}`;
+  if (visible.length <= 8) return `You have ${count} in ${label}, sir: ${visible.join(", ")}.`;
+  return `You have ${count} in ${label}, sir, including ${visible.slice(0, 6).join(", ")}.`;
+}
+
+export function describeSize(label: string, bytes: number): string {
+  if (bytes >= 2 ** 30) return `Your ${label} folder is ${(bytes / 2 ** 30).toFixed(1)} gigabytes, sir.`;
+  if (bytes >= 2 ** 20) return `Your ${label} folder is ${Math.round(bytes / 2 ** 20)} megabytes, sir.`;
+  return `Your ${label} folder is under one megabyte, sir.`;
+}
+
+async function folderInfo(args: Args): Promise<Result> {
+  const key = text(args.folder).toLowerCase();
+  if (!(key in FOLDERS)) return { ok: false, say: "I can't find that folder, sir." };
+  const path = join(homedir(), FOLDERS[key]);
+  const label = FOLDERS[key] || "home";
+  if (!existsSync(path)) return { ok: false, say: `You don't have a ${label} folder, sir.` };
+  if (text(args.want) === "size") {
+    const { stdout } = await run("du", ["-sb", path], { timeout: 20_000 });
+    return { ok: true, say: describeSize(label, Number(stdout.split(/\s/)[0])) };
+  }
+  return { ok: true, say: describeFolder(label, readdirSync(path)) };
+}
+
+// What a project is, from its own files, so a question about it stays about your project.
+export function projectSummary(name: string, root = PROJECTS_ROOT): string {
+  const folder = join(root, name);
+  const clip = (value: string) => value.replace(/[#*_`>[\]]/g, "").replace(/\s+/g, " ").trim().slice(0, 180);
+  try {
+    const description = JSON.parse(readFileSync(join(folder, "package.json"), "utf8")).description;
+    if (typeof description === "string" && description.trim()) return `${name} is one of your projects, sir: ${clip(description)}.`;
+  } catch {
+    // Not every project has a package.json.
+  }
+  try {
+    const readme = readFileSync(join(folder, "README.md"), "utf8");
+    const paragraph = readme.split(/\n\s*\n/).map(clip).find((part) => part.length > 20 && !part.startsWith("!"));
+    if (paragraph) return `${name} is one of your projects, sir: ${paragraph}.`;
+  } catch {
+    // Nor a README.
+  }
+  return `${name} is one of your projects, sir. Tell me to start working on it and Claude can explain it.`;
+}
+
 // ---- Terminal ---------------------------------------------------------------
 
 export async function runApproved(command: string): Promise<Result> {
@@ -315,7 +371,8 @@ export async function runApproved(command: string): Promise<Result> {
       maxBuffer: 4_000_000,
     });
     const output = (stdout || stderr).trim();
-    return { ok: true, say: output ? output.slice(0, 500) : "Done, sir." };
+    if (!output) return { ok: true, say: "Done, sir." };
+    return { ok: true, say: output.slice(0, 1500), spoken: "Done, sir. The result is in the chat." };
   } catch (error) {
     const failed = error as { stderr?: string; message: string };
     return { ok: false, say: `That failed, sir. ${(failed.stderr || failed.message).trim().slice(0, 300)}` };
@@ -400,6 +457,16 @@ export const TOOLS: Record<string, Tool> = {
     description: "Read battery, CPU, memory, disk or network status.",
     params: { what: "battery, cpu, memory, disk or network" },
     run: systemInfo,
+  },
+  folder_info: {
+    description: "What's in a personal folder, or how big it is.",
+    fastOnly: true,
+    run: folderInfo,
+  },
+  project_info: {
+    description: "What one of his projects is.",
+    fastOnly: true,
+    run: (args) => ({ ok: true, say: projectSummary(text(args.project)) }),
   },
   list_projects: {
     description: "List his coding projects.",

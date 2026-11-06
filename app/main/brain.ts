@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFi
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { clean, fastPath, type Call } from "./fastpath.ts";
+import { clean, fastPath, looksLikeCoding, type Call } from "./fastpath.ts";
 import { meaningfulWords, Memory, memoryCommand } from "./memory.ts";
 import { listProjects, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, type Level } from "./safety.ts";
@@ -33,6 +33,8 @@ export type Reply = {
   source: "fast" | "model" | "tool";
   tool?: string;
   pending?: Pending;
+  // What to say aloud when it differs from what the chat shows.
+  spoken?: string;
   // Jarvis asked something, so the microphone should open without the wake word.
   listen?: boolean;
   ms: number;
@@ -166,6 +168,8 @@ export class Jarvis {
   private memory: Memory | null;
   private lastProject: string | null = null;
   private awaitingProject = false;
+  // A coding request made with no project open, waiting to be sent once one is.
+  private waitingTask: string | null = null;
 
   constructor(ctx: Context = { dryRun: false }, memory: Memory | null = null) {
     this.ctx = ctx;
@@ -198,7 +202,16 @@ export class Jarvis {
     // rather than to a shell command guessed by the small model.
     if (call.tool === "run_command" && this.ctx.claude?.openProject) call = { tool: "ask_claude", args: {} };
     // Claude gets the user's exact words, never the small model's rewrite of them.
-    if (call.tool === "ask_claude") call = { ...call, args: { task: said } };
+    if (call.tool === "ask_claude") {
+      call = { ...call, args: { task: said } };
+      if (this.ctx.claude && !this.ctx.claude.openProject) {
+        this.waitingTask = said;
+        this.awaitingProject = true;
+        const projects = this.projectNames();
+        const reply = this.finish(said, `Which project is that for, sir? You have ${projects.join(", ")}.`, source, begin, "ask_claude");
+        return { ...reply, spoken: "Which project is that for, sir?", listen: true };
+      }
+    }
     // Search for what was actually asked, not the model's rewrite of it.
     if (call.tool === "web_answer") call = { ...call, args: { question: clean(said) } };
     const tool = TOOLS[call.tool];
@@ -214,7 +227,7 @@ export class Jarvis {
           : `I'll run: ${command}. Shall I go ahead, sir?`;
         return { say: ask, source, tool: call.tool, pending: result.needsApproval, ms: Date.now() - begin };
       }
-      return this.finish(said, result.say, source, begin, call.tool);
+      return { ...this.finish(said, result.say, source, begin, call.tool), spoken: result.spoken };
     } catch (error) {
       log({ said, tool: call.tool, error: String(error) });
       return this.finish(said, "That didn't work, sir.", source, begin, call.tool);
@@ -242,8 +255,8 @@ export class Jarvis {
         return { say: "Cancelled, sir. I didn't run it.", source: "fast", ms: Date.now() - begin };
       }
       log({ said, command, level, approved: true, dryRun: this.ctx.dryRun });
-      const result = this.ctx.dryRun ? { say: "Done, sir." } : await runApproved(command);
-      return { say: result.say, source: "tool", tool: "run_command", ms: Date.now() - begin };
+      const result: { say: string; spoken?: string } = this.ctx.dryRun ? { say: "Done, sir." } : await runApproved(command);
+      return { say: result.say, spoken: result.spoken, source: "tool", tool: "run_command", ms: Date.now() - begin };
     }
 
     // A bare answer with no question waiting mustn't reach the model, which would guess
@@ -276,7 +289,19 @@ export class Jarvis {
     // "Which project, sir?" was just asked, so a bare name answers it.
     if (this.awaitingProject) {
       this.awaitingProject = false;
-      if (mentioned) return this.runTool({ tool: "start_coding", args: { project: mentioned } }, "fast", said, begin);
+      const task = this.waitingTask;
+      this.waitingTask = null;
+      if (mentioned) {
+        const reply = await this.runTool({ tool: "start_coding", args: { project: mentioned } }, "fast", said, begin);
+        // Claude queues this until its session is ready.
+        if (task && this.ctx.claude?.openProject) this.ctx.claude.ask(task);
+        return task ? { ...reply, say: `${reply.say} I'll pass your request along.` } : reply;
+      }
+    }
+
+    // A question about one of his projects is about that project, not the web.
+    if (mentioned && /^(tell me about|what is|what's|whats|describe|what do you know about)\b/i.test(clean(said))) {
+      return this.runTool({ tool: "project_info", args: { project: mentioned } }, "fast", said, begin);
     }
     const intent = projectIntent(clean(said), projects, this.lastProject);
     if (intent && "project" in intent) {
@@ -291,6 +316,8 @@ export class Jarvis {
       const reply = this.finish(said, `Which project, sir? You have ${projects.join(", ")}.`, "fast", begin);
       return { ...reply, listen: true };
     }
+
+    if (looksLikeCoding(said)) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
 
     const quick = fastPath(said);
     // "Start working with it" isn't an app. Only a program that really exists opens directly.

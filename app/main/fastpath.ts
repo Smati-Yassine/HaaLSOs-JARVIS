@@ -38,6 +38,12 @@ export function fastPath(said: string): Call | null {
     return { tool: "get_time", args: { want: "date" } };
   }
 
+  if ((match = lower.match(/^how (?:big|large) is (?:my |the )?(downloads|documents|desktop|pictures|music|videos|home)(?: folder)?$/))) {
+    return { tool: "folder_info", args: { folder: match[1], want: "size" } };
+  }
+  if ((match = lower.match(/^(?:what'?s|what is|show(?: me)?|list)(?: what'?s)?(?: in| inside)?(?: my| the)?\s+(downloads|documents|desktop|pictures|music|videos|home)(?: folder)?$/))) {
+    return { tool: "folder_info", args: { folder: match[1] } };
+  }
   if (/\b(list|show|what are|which are|name)\b.*\bprojects\b/.test(lower)) return { tool: "list_projects", args: {} };
 
   // Saying "google" always means Brave, even for the weather.
@@ -97,3 +103,8 @@ export function fastPath(said: string): Call | null {
   if (/\b(internet|online|wi-?fi|network)\b/.test(lower) && /^(am i|are we|is|do i|check|what)/.test(lower)) return { tool: "system_info", args: { what: "network" } };
   return null;
 }
+
+// Plainly a coding request, so it should reach Claude without the model guessing.
+const DOES = /^(add|fix|make|change|refactor|rename|update|implement|create|write|remove|debug|move|style|center)\b/i;
+const CODE_THING = /\b(navbar|nav bar|button|css|html|component|function|class|bug|api|endpoint|database|schema|login|signup|settings page|page|footer|header|sidebar|modal|form|route|test|tests|module|dark mode|layout|responsive|sticky)\b/i;
+export const looksLikeCoding = (said: string) => DOES.test(clean(said)) && CODE_THING.test(said);

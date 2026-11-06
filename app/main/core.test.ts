@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
 import { Jarvis, parseTextCall, pruneLog, scrubLog, speakable, toolFitsWords } from "./brain.ts";
-import { fastPath } from "./fastpath.ts";
+import { fastPath, looksLikeCoding } from "./fastpath.ts";
 import { containsSecret, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { findProject, projectInSentence, projectIntent } from "./projects.ts";
 import { classify, isApproval } from "./safety.ts";
-import { findApp, googleUrl, homeCity, weatherSentence, websiteUrl } from "./tools.ts";
+import { describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
 import { spokenForm } from "./voice.ts";
 import { answerPrompt, siteName, topResults } from "./web.ts";
 import { decodeReply, knownAction, pickWindow } from "./windows.ts";
@@ -391,4 +391,55 @@ test("the conversation carries a project across turns", async () => {
   reply = await jarvis.handle("residu");
   assert.equal(reply.tool, "start_coding");
   assert.deepEqual(opened, ["resido"]);
+});
+
+test("a question about a project stays about that project", async () => {
+  const jarvis = new Jarvis({ dryRun: true, projects: () => MY_PROJECTS });
+  const reply = await jarvis.handle("Tell me about resido");
+  assert.equal(reply.tool, "project_info");
+  assert.match(reply.say, /resido is one of your projects/);
+  const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-proj-"));
+  mkdirSync(joinPath(dir, "a"));
+  writeFileSync(joinPath(dir, "a", "package.json"), JSON.stringify({ description: "A booking app" }));
+  assert.match(projectSummary("a", dir), /A booking app/);
+  mkdirSync(joinPath(dir, "b"));
+  writeFileSync(joinPath(dir, "b", "README.md"), "# Title\n\n![badge](x)\n\nA small **quiz** game for friends.\n");
+  assert.match(projectSummary("b", dir), /A small quiz game for friends/);
+  rmSync(dir, { recursive: true });
+});
+
+test("folders are described in words, and terminal output isn't read aloud", async () => {
+  assert.deepEqual(fastPath("What's in my downloads folder?"), { tool: "folder_info", args: { folder: "downloads" } });
+  assert.deepEqual(fastPath("list my documents"), { tool: "folder_info", args: { folder: "documents" } });
+  assert.deepEqual(fastPath("how big is my downloads folder"), { tool: "folder_info", args: { folder: "downloads", want: "size" } });
+  assert.equal(describeFolder("Downloads", [".hidden"]), "Your Downloads folder is empty, sir.");
+  assert.equal(describeFolder("Downloads", ["b.txt", "a.png"]), "You have 2 items in Downloads, sir: a.png, b.txt.");
+  assert.match(describeFolder("Music", Array.from({ length: 12 }, (_, i) => `song${i}`)), /12 items.*including/);
+  assert.equal(describeSize("Downloads", 3 * 2 ** 30), "Your Downloads folder is 3.0 gigabytes, sir.");
+  const result = await runApproved("printf 'total 8\\ndrwx x'");
+  assert.match(result.say, /total 8/);
+  assert.match(result.spoken ?? "", /in the chat/);
+});
+
+test("coding requests with no project ask which, then get passed along", async () => {
+  assert.equal(looksLikeCoding("make the navbar sticky"), true);
+  assert.equal(looksLikeCoding("make a folder called invoices"), false);
+  assert.equal(looksLikeCoding("tell me a joke"), false);
+  const opened: string[] = [];
+  const asked: string[] = [];
+  const claude = {
+    openProject: null as string | null,
+    start(name: string) { opened.push(name); this.openProject = name; },
+    ask: (task: string) => (asked.push(task), true),
+    close() {},
+  };
+  const jarvis = new Jarvis({ dryRun: false, claude, projects: () => MY_PROJECTS });
+  let reply = await jarvis.handle("make the navbar sticky");
+  assert.match(reply.say, /Which project/);
+  assert.equal(reply.listen, true);
+  assert.deepEqual(asked, []);
+  reply = await jarvis.handle("tempura");
+  assert.deepEqual(opened, ["tempura"]);
+  assert.deepEqual(asked, ["make the navbar sticky"]);
+  assert.match(reply.say, /pass your request along/);
 });

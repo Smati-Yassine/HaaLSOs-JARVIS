@@ -117,7 +117,7 @@ function closeClaude() {
 }
 
 function speakReply(reply: Reply) {
-  voice?.say(reply.say, Boolean(reply.pending || reply.listen));
+  voice?.say(reply.spoken ?? reply.say, Boolean(reply.pending || reply.listen));
 }
 
 async function handleSaid(said: string): Promise<Reply> {
