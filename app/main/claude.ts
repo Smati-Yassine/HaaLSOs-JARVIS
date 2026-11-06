@@ -578,7 +578,7 @@ export class ClaudeManager {
       if (session.gate) this.gateAnswered(session, false);
       if (session.kind === "shell") {
         this.sessions.delete(session.id);
-        if (this.active === session.id) this.active = [...this.sessions.keys()][0] ?? null;
+        if (this.active === session.id) this.active = [...this.sessions.values()].find((other) => other.pty)?.id ?? null;
       } else if (session.state === "running") session.state = "paused";
       this.changed();
     });
@@ -652,6 +652,7 @@ export class ClaudeManager {
     this.project = project;
     this.path = path;
     this.sessions.clear();
+    this.active = null;
     for (const stored of this.load(project)) {
       const session = this.blank(stored.id, "claude", plainPrompt(stored.title) || stored.title);
       session.state = stored.archived ? "archived" : "paused";
@@ -661,7 +662,9 @@ export class ClaudeManager {
     if (this.watcher) clearInterval(this.watcher);
     this.watcher = setInterval(() => this.syncOutside(), 15_000);
     this.watcher.unref();
-    return this.newSession();
+    // With old sessions to go back to, the choice is the user's. With none, there's nothing to choose.
+    if (![...this.sessions.values()].some((session) => session.state !== "archived")) this.newSession();
+    this.changed();
   }
 
   // Brings in sessions from VS Code and terminals, most recent first, including new ones that
@@ -751,7 +754,7 @@ export class ClaudeManager {
       this.remember(session);
     }
     if (this.active === id) {
-      this.active = [...this.sessions.values()].find((other) => other.state !== "archived")?.id ?? null;
+      this.active = [...this.sessions.values()].find((other) => other.pty)?.id ?? null;
     }
     this.changed();
   }
@@ -815,9 +818,11 @@ export class ClaudeManager {
   }
 
   ask(text: string): boolean {
-    const session = this.currentClaude();
-    if (!session) return false;
-    this.active = session.id;
+    if (!this.project) return false;
+    // Nothing picked yet, so asking for something starts a new session for it.
+    const id = this.currentClaude()?.id ?? this.newSession();
+    const session = this.sessions.get(id)!;
+    this.active = id;
     if (session.ready) this.type(session, text);
     else session.queued.push(text);
     this.changed();

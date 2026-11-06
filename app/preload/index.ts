@@ -4,7 +4,6 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("jarvis", {
   ask: (said: string) => ipcRenderer.invoke("jarvis:ask", said),
   choose: (index: number, label: string) => ipcRenderer.invoke("jarvis:choose", index, label),
-  resumeChat: () => ipcRenderer.invoke("chats:resume"),
   listChats: () => ipcRenderer.invoke("chats:list"),
   openChat: (id: number) => ipcRenderer.invoke("chats:open", id),
   newChat: () => ipcRenderer.invoke("chats:new"),

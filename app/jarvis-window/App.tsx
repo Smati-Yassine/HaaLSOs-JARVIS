@@ -27,7 +27,6 @@ declare global {
     jarvis: {
       ask(said: string): Promise<Reply>;
       choose(index: number, label: string): Promise<Reply>;
-      resumeChat(): Promise<Turn[]>;
       listChats(): Promise<{ chats: Chat[]; current: number | null }>;
       openChat(id: number): Promise<Turn[]>;
       newChat(): Promise<void>;
@@ -326,6 +325,7 @@ export function App() {
   const [pulse, setPulse] = useState(0);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [claudeAsking, setClaudeAsking] = useState(false);
+  const [choosing, setChoosing] = useState(false);
   const [chats, setChats] = useState<Chat[]>([]);
   const [scrolledBack, setScrolledBack] = useState(false);
   const [engine] = useState(() => new LineEngine());
@@ -474,7 +474,20 @@ export function App() {
   useEffect(() => {
     engine.project = Boolean(openProject);
     if (openProject && engine.snap === "low") engine.setSnap("mid");
+    setChoosing(false);
   }, [engine, openProject]);
+
+  // Esc leaves the session view, instead of stopping Claude behind it.
+  useEffect(() => {
+    if (!choosing || pending) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setChoosing(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [choosing, pending]);
 
   // Alt+arrows move the line from anywhere, even from inside a terminal.
   useEffect(() => {
@@ -499,7 +512,6 @@ export function App() {
   useEffect(() => {
     let alive = true;
     const started = Date.now();
-    window.jarvis.resumeChat().then((turns) => alive && setMessages((list) => [...asMessages(turns), ...list]));
     window.jarvis.warmUp().then((ready) => {
       if (!alive) return;
       window.setTimeout(() => {
@@ -669,12 +681,24 @@ export function App() {
 
       {openProject && claude && (
         <div className="below">
-          <ClaudePanel snap={claude} mode={mode} asking={asking} />
+          <ClaudePanel snap={claude} mode={mode} asking={asking} choosing={choosing} onChosen={() => setChoosing(false)} />
         </div>
       )}
 
       <Line engine={engine} mood={mood} pulse={pulse} movable={Boolean(openProject) && !prefsOpen} />
-      {openProject && claude && <ClaudeBand snap={claude} engine={engine} asking={asking && claudeAsking} />}
+      {openProject && claude && (
+        <ClaudeBand
+          snap={claude}
+          engine={engine}
+          asking={asking && claudeAsking}
+          choosing={choosing}
+          onToggleChoosing={() => {
+            if (engine.snap === "low") engine.setSnap("mid");
+            setChoosing((value) => !value);
+            input.current?.focus();
+          }}
+        />
+      )}
       <Timers engine={engine} />
 
       <form

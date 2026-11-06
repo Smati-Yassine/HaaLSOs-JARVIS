@@ -20,7 +20,6 @@ const logDir = () => process.env.JARVIS_LOG_DIR || join(homedir(), ".Jarvis", "l
 const commandLog = () => join(logDir(), "commands.jsonl");
 const LOG_DAYS = 30;
 const KEEP_TURNS = 12;
-const RECENT_CHAT_MS = 12 * 3_600_000;
 
 const SYSTEM = `You are Jarvis, the user's personal assistant on his Linux computer. Address him as sir. \
 Keep spoken replies to one or two short sentences, with no emoji. Use a tool whenever the request is an action \
@@ -373,12 +372,6 @@ export class Jarvis {
     const wasCurrent = this.memory.currentChat === id;
     scrubSaid(this.memory.deleteChat(id));
     if (wasCurrent) this.load([]);
-  }
-
-  // What the chat should show when the app opens.
-  resumeRecent(): Turn[] {
-    if (!this.memory?.continueRecent(RECENT_CHAT_MS)) return [];
-    return this.openChat(this.memory.currentChat!);
   }
 
   forgetFact(id: number) {

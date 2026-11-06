@@ -223,14 +223,6 @@ export class Memory {
     return true;
   }
 
-  // Picks up the latest conversation only if it was recent. Older ones are a click away.
-  continueRecent(maxAgeMs: number, now = Date.now()): boolean {
-    const latest = this.chats(1)[0];
-    if (!latest || now - latest.updated > maxAgeMs) return false;
-    this.current = latest.id;
-    return true;
-  }
-
   // Deleting is real. Returns what the user said in it, so the log can drop those lines too.
   deleteChat(id: number): string[] {
     const said = this.chatTurns(id).filter((turn) => turn.role === "user").map((turn) => turn.text);

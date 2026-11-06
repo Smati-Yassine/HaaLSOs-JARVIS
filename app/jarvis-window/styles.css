@@ -158,24 +158,37 @@ kbd { display: inline-grid; place-items: center; min-width: 22px; height: 22px; 
 .label-x:hover { color: var(--alarm); }
 .where { position: absolute; top: 31px; left: 0; right: 0; width: var(--col); margin-inline: auto; text-align: center; font: 400 0.72rem/1.2 var(--mono); color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .where b { margin-right: 6px; font: 500 0.74rem/1.2 var(--sans); color: var(--text); }
-.band-add { position: absolute; top: 23px; right: 16px; width: 22px; height: 22px; display: grid; place-items: center; padding: 0; background: none; border: 0; border-radius: 4px; pointer-events: auto; font-size: 1.05rem; line-height: 1; color: var(--mute); }
-.band-add:hover, .band-add[aria-expanded="true"] { background: var(--lift); color: var(--ink); }
-.band-menu { position: absolute; top: 48px; right: 12px; width: 270px; max-height: 340px; overflow-y: auto; padding: 6px; background: var(--raised); border: 1px solid var(--hair); border-radius: 10px; display: grid; gap: 1px; pointer-events: auto; font-size: 0.88rem; animation: fade 0.12s; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
-.band-menu > button { padding: 6px 8px; background: none; border: 0; border-radius: 6px; text-align: left; }
-.band-menu > button:hover { background: var(--lift); }
-.band-menu small { margin: 8px 8px 2px; color: var(--mute); font-size: 0.74rem; }
-.menu-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 8px; color: var(--mute); font-size: 0.82rem; }
-.menu-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.menu-row button { flex: none; padding: 0; background: none; border: 0; font-size: 0.76rem; color: var(--ink); }
-.menu-row em { flex: none; font-style: normal; font-size: 0.72rem; }
+.band-tools { position: absolute; top: 20px; right: 10px; display: flex; pointer-events: auto; }
+.band-tools button { width: 28px; height: 26px; display: grid; place-items: center; padding: 0; background: none; border: 0; border-radius: 4px; color: var(--mute); transition: background 0.15s, color 0.15s; }
+.band-tools button:hover, .band-tools button[aria-pressed="true"] { background: var(--lift); color: var(--ink); }
+.band-tools button.quit:hover { background: var(--alarm); color: #fff; }
+.band-tools svg { width: 12px; height: 12px; }
 
 /* Below the line: Claude */
-.below { position: absolute; top: calc(var(--ly) + 50px); left: 0; right: 0; bottom: 0; z-index: 1; display: flex; animation: fade 0.4s; }
+.below { position: absolute; top: calc(var(--ly) + 50px); left: 0; right: 0; bottom: 0; z-index: 1; display: flex; overflow: hidden; animation: fade 0.4s; }
 .claude-panel { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .terminals { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
 /* Claude's screen needs a usable height, so when the line is low it keeps its size and shows its last rows. */
 .terminal-host { position: absolute; left: 12px; right: 0; bottom: 6px; height: calc(100% - 6px); min-height: 220px; }
-.empty { margin: 0; padding: 8px 18px; color: var(--mute); }
+.session-view { position: absolute; inset: 0; z-index: 1; overflow-y: auto; background: var(--ground); animation: fade 0.2s; scrollbar-width: thin; scrollbar-color: var(--hair) transparent; }
+.session-inner { width: min(560px, 100%); margin-inline: auto; padding: 14px 16px 24px; display: grid; gap: 4px; }
+.session-new { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.session-new button { padding: 8px 14px; background: none; border: 1px solid var(--hair); border-radius: 8px; font-size: 0.92rem; transition: border-color 0.15s; }
+.session-new button:hover { border-color: var(--ink); }
+.session-new .primary { background: var(--ink); border-color: var(--ink); color: var(--ground); font-weight: 500; }
+.session-inner h2 { margin: 0 0 4px; font-size: 0.78rem; font-weight: 500; color: var(--mute); }
+.session-inner ul { margin: 0; padding: 0; list-style: none; }
+.session-inner li { display: flex; align-items: center; border-radius: 8px; transition: background 0.12s; }
+.session-inner li:hover, .session-inner li.on { background: var(--raised); }
+.session-open { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; background: none; border: 0; text-align: left; font-size: 0.92rem; }
+.session-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-open em { flex: none; font-style: normal; font-size: 0.74rem; color: var(--mute); }
+.session-open:disabled { cursor: default; color: var(--mute); }
+.session-x { flex: none; width: 26px; height: 26px; margin-right: 4px; padding: 0; background: none; border: 0; border-radius: 4px; color: var(--mute); opacity: 0; }
+.session-inner li:hover .session-x, .session-x:focus-visible { opacity: 1; }
+.session-x:hover { color: var(--alarm); }
+.session-archived { justify-self: start; margin-top: 12px; padding: 2px 0; background: none; border: 0; border-bottom: 1px solid var(--hair); font-size: 0.82rem; color: var(--mute); transition: color 0.15s, border-color 0.15s; }
+.session-archived:hover { color: var(--ink); border-color: var(--ink); }
 .status { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; min-height: 40px; padding: 5px 14px; border-top: 1px solid var(--hair); font-size: 0.78rem; color: var(--mute); }
 .pick { display: inline-flex; align-items: center; gap: 6px; }
 .pick select { background: var(--lift); border: 0; border-radius: 4px; padding: 4px 6px; font-size: 0.78rem; font-weight: 500; color: var(--text); }
@@ -190,8 +203,6 @@ kbd { display: inline-grid; place-items: center; min-width: 22px; height: 22px; 
 .stop:hover { background: var(--alarm); color: var(--ground); }
 .bypass-tag { padding: 2px 8px; border: 1px solid var(--alarm); border-radius: 4px; font-weight: 500; color: var(--alarm); white-space: nowrap; }
 .plan { margin-left: auto; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; }
-.leave { background: none; border: 0; border-radius: 4px; padding: 2px 8px; color: var(--mute); transition: background 0.15s, color 0.15s; }
-.leave:hover { background: var(--alarm); color: var(--ground); }
 
 @media (max-width: 759px) {
   .shell, .shell[data-project="open"] { --col: calc(100vw - 32px); }

@@ -48,6 +48,7 @@ export class LineEngine {
   snap: Snap = (["high", "mid", "low"] as const).find((name) => name === stored("jarvis-line")) ?? "mid";
   moved = stored("jarvis-line-moved") === "1";
   onMoved: (() => void) | null = null;
+  onSnap: ((snap: Snap) => void) | null = null;
   project = false;
   prefs = false;
 
@@ -82,7 +83,8 @@ export class LineEngine {
   }
   private snapY(name: Snap): number {
     const high = 36 + 96 + 14 + this.clearance;
-    const low = Math.max(high + 80, this.height - 150);
+    // All the way down, only the strands of Claude's side stay in view.
+    const low = Math.max(high + 80, this.height - 50);
     if (name === "high") return high;
     if (name === "low") return low;
     return Math.min(low - 40, Math.max(high + 40, this.height * 0.42));
@@ -99,6 +101,7 @@ export class LineEngine {
   setSnap(name: Snap) {
     this.snap = name;
     store("jarvis-line", name);
+    this.onSnap?.(name);
   }
   private markMoved() {
     if (this.moved) return;
@@ -264,7 +267,7 @@ export class LineEngine {
     const whole = this.segments.length < 2;
     const leftEnd = whole ? this.width * 0.62 : this.segments[0][1] - 14;
     const rightStart = whole ? this.width * 0.62 : this.segments[1][0] + 14;
-    const rightEnd = this.width - 44;
+    const rightEnd = this.width - 100; // Clear of the +, minimize and close buttons.
     claudes.forEach((strand, index) => {
       const width = Math.min(190, (leftEnd - 18) / claudes.length);
       strand.tx1 = 18 + index * width;

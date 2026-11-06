@@ -616,15 +616,6 @@ test("conversations keep their own lines, and can be resumed and deleted", () =>
   assert.equal(memory.openChat(first), false);
 });
 
-test("only a recent conversation carries on by itself", () => {
-  const memory = new Memory(":memory:");
-  memory.addTurn("user", "hello there", 1000);
-  memory.startChat();
-  assert.equal(memory.continueRecent(500, 2000), false);
-  assert.equal(memory.currentChat, null);
-  assert.equal(memory.continueRecent(5000, 2000), true);
-});
-
 test("an older memory file keeps everything and gains conversations and better search", () => {
   const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-old-memory-"));
   const path = joinPath(dir, "memory.sqlite");

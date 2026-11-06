@@ -368,7 +368,6 @@ ipcMain.handle("jarvis:choose", (_event, index: unknown, label: unknown) => {
   speakReply(reply);
   return reply;
 });
-ipcMain.handle("chats:resume", () => jarvis.resumeRecent());
 ipcMain.handle("chats:list", () => ({ chats: memory.chats(), current: memory.currentChat }));
 ipcMain.handle("chats:open", (_event, id: unknown) => jarvis.openChat(Number(id)));
 ipcMain.handle("chats:new", () => jarvis.startChat());
