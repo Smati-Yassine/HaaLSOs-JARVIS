@@ -108,3 +108,32 @@ export function fastPath(said: string): Call | null {
 const DOES = /^(add|fix|make|change|refactor|rename|update|implement|create|write|remove|debug|move|style|center)\b/i;
 const CODE_THING = /\b(navbar|nav bar|button|css|html|component|function|class|bug|api|endpoint|database|schema|login|signup|settings page|page|footer|header|sidebar|modal|form|route|test|tests|module|dark mode|layout|responsive|sticky)\b/i;
 export const looksLikeCoding = (said: string) => DOES.test(clean(said)) && CODE_THING.test(said);
+
+// "Open firefox and set the volume to 40" is two commands. Only splits when every part is a
+// command on its own, so "google cats and dogs" stays a single search.
+export function splitCommands(said: string): string[] | null {
+  const parts = clean(said).split(/\s*(?:,\s*(?:and\s+|then\s+)?|\s+and then\s+|\s+then\s+|\s+and\s+)\s*/i).filter(Boolean);
+  if (parts.length < 2 || parts.length > 5) return null;
+  return parts.every((part) => fastPath(part) !== null) ? parts : null;
+}
+
+// Claude's controls, by voice. Returns the action, or null if this isn't about them.
+export type ClaudeAction =
+  | { act: "effort"; level: string } | { act: "model"; name: string } | { act: "session" } | { act: "terminal" }
+  | { act: "archive" } | { act: "hide" } | { act: "show" };
+export function claudeAction(said: string): ClaudeAction | null {
+  const lower = clean(said).toLowerCase();
+  const effort = lower.match(/\beffort\b.*?\b(x ?high|extra high|low|medium|high|maximum|max)\b/) ?? lower.match(/\b(x ?high|extra high|low|medium|high|maximum|max)\b.*\beffort\b/);
+  if (effort) {
+    const level = effort[1].replace(/^x ?high|^extra high/, "xhigh").replace("maximum", "max");
+    return { act: "effort", level };
+  }
+  const model = lower.match(/\b(?:switch|change|use|set|move|go)\b.*\b(fable|opus|sonnet|haiku)\b/);
+  if (model) return { act: "model", name: model[1] };
+  if (/\b(new|another)\b.*\b(session|conversation)\b|\bstart a session\b/.test(lower)) return { act: "session" };
+  if (/\b(new|another|second|plain|open a)\b.*\bterminal\b/.test(lower)) return { act: "terminal" };
+  if (/\barchive\b/.test(lower)) return { act: "archive" };
+  if (/\b(hide|minimi[sz]e)\b.*\bclaude\b/.test(lower)) return { act: "hide" };
+  if (/\b(show|bring|open|back to)\b.*\bclaude\b/.test(lower)) return { act: "show" };
+  return null;
+}

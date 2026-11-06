@@ -221,6 +221,9 @@ export function App() {
         case "show-claude":
           setPanelHidden(false);
           break;
+        case "hide-claude":
+          setPanelHidden(true);
+          break;
       }
     });
   }, [speak, updateVoice]);

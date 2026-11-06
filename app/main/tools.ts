@@ -28,6 +28,12 @@ export type ClaudeControl = {
   start(project: string, path: string): void;
   ask(task: string): boolean;
   close(): void;
+  setEffort?(level: string): boolean;
+  setModel?(name: string): string | null;
+  newSession?(): void;
+  newTerminal?(): void;
+  archive?(): string | null;
+  setVisible?(visible: boolean): void;
 };
 export type Context = {
   dryRun: boolean;

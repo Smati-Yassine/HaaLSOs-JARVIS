@@ -7,7 +7,7 @@ import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electro
 import { Jarvis, pruneLog, summarize, unloadModel, type Pending, type Reply } from "./brain.ts";
 import { ClaudeManager, type Permission } from "./claude.ts";
 import { Memory } from "./memory.ts";
-import { classify, isApproval } from "./safety.ts";
+import { classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { healthCheck, setStartAtLogin, startsAtLogin } from "./system.ts";
 import { Voice, type VoiceEvent } from "./voice.ts";
 import { startSearch, stopSearch } from "./web.ts";
@@ -36,7 +36,7 @@ let window: BrowserWindow | null = null;
 let voice: Voice | null = null;
 
 // Claude can't continue until the user answers, so questions wait in line here.
-const permissions: (Permission & Pending)[] = [];
+const permissions: (Permission & Pending & { trust?: boolean })[] = [];
 
 function toWindow(event: Record<string, unknown>) {
   window?.webContents.send("jarvis:event", event);
@@ -50,7 +50,7 @@ const claude = new ClaudeManager({
     window?.webContents.send("claude:data", id, data);
   },
   permission(permission) {
-    const level = permission.shell ? classify(permission.command) : "say-back";
+    const level = permission.shell ? classifyForClaude(permission.command) : "say-back";
     permissions.push({ ...permission, level: level === "run" ? "say-back" : level });
     if (permissions.length === 1) askPermission();
   },
@@ -59,8 +59,8 @@ const claude = new ClaudeManager({
     announce(summary ? `Claude has finished, sir. ${summary}` : "Claude has finished, sir.");
   },
   trustNeeded(project) {
-    toWindow({ type: "show-claude" });
-    announce(`Claude is asking whether you trust ${project}, sir. Please answer in its window.`);
+    permissions.unshift({ id: -1, session: "", command: project, shell: false, level: "say-back", trust: true });
+    askPermission();
   },
 });
 
@@ -73,6 +73,13 @@ function announce(say: string, pending?: Pending, spoken = say) {
 function askPermission() {
   const next = permissions[0];
   if (!next) return;
+  if (next.trust) {
+    const ask = next.command === "Computer"
+      ? "Claude needs your OK to work across your home folder, sir. Do you allow it?"
+      : `This is Claude's first time in ${next.command}, sir. Do you trust this folder?`;
+    announce(ask, { command: next.command, level: "say-back" });
+    return;
+  }
   const ask = next.level === "confirm"
     ? `Claude wants to do something dangerous, sir: ${next.command}. Say confirm to allow it.`
     : `Claude wants to run: ${next.command}. Allow it, sir?`;
@@ -88,8 +95,16 @@ function askPermission() {
 function answerPermission(said: string): Reply | null {
   const next = permissions[0];
   if (!next) return null;
+  if (next.level === "confirm" && isPlainYes(said)) {
+    return { say: "This one is dangerous, sir, so I need you to say confirm, or cancel.", source: "fast", tool: "claude", pending: { command: next.command, level: next.level }, ms: 0 };
+  }
   permissions.shift();
   const allowed = isApproval(said, next.level);
+  if (next.trust) {
+    claude.answerTrust(allowed);
+    setTimeout(askPermission, 300);
+    return { say: allowed ? "Thank you, sir. Claude is starting." : "Understood, sir. I've closed it.", source: "fast", tool: "claude", ms: 0 };
+  }
   claude.answerPermission(next.id, allowed);
   const reply: Reply = { say: allowed ? "Allowed, sir." : "Denied, sir. Claude won't run it.", source: "fast", tool: "claude", ms: 0 };
   setTimeout(askPermission, 300);
@@ -109,6 +124,12 @@ jarvis.connectClaude({
   close() {
     closeClaude();
   },
+  setEffort: (level) => claude.setActiveEffort(level),
+  setModel: (name) => claude.setActiveModel(name),
+  newSession: () => void claude.newSession(),
+  newTerminal: () => void claude.newTerminal(),
+  archive: () => claude.archiveActive(),
+  setVisible: (visible) => toWindow({ type: visible ? "show-claude" : "hide-claude" }),
 });
 
 function closeClaude() {

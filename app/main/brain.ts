@@ -3,10 +3,10 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFi
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { clean, fastPath, looksLikeCoding, type Call } from "./fastpath.ts";
+import { claudeAction, clean, fastPath, looksLikeCoding, splitCommands, type Call } from "./fastpath.ts";
 import { meaningfulWords, Memory, memoryCommand } from "./memory.ts";
 import { listProjects, projectInSentence, projectIntent } from "./projects.ts";
-import { isApproval, type Level } from "./safety.ts";
+import { isApproval, isPlainYes, type Level } from "./safety.ts";
 import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
 const OLLAMA = "http://localhost:11434/api/chat";
@@ -201,6 +201,9 @@ export class Jarvis {
     // While a project is open, work goes to Claude, which knows the project and asks permission,
     // rather than to a shell command guessed by the small model.
     if (call.tool === "run_command" && this.ctx.claude?.openProject) call = { tool: "ask_claude", args: {} };
+    // With nothing open, computer tasks still go to Claude, which can really do them and asks
+    // through Jarvis. The small model's guessed shell commands are too unreliable to run.
+    if (call.tool === "run_command" && this.ctx.claude) return this.handToClaude(said, source, begin);
     // Claude gets the user's exact words, never the small model's rewrite of them.
     if (call.tool === "ask_claude") {
       call = { ...call, args: { task: said } };
@@ -234,6 +237,51 @@ export class Jarvis {
     }
   }
 
+  private handToClaude(said: string, source: Reply["source"], begin: number): Reply {
+    const claude = this.ctx.claude!;
+    log({ said, tool: "claude_task", source, dryRun: this.ctx.dryRun });
+    if (!this.ctx.dryRun) {
+      if (!claude.openProject) claude.start("Computer", homedir());
+      claude.ask(said);
+    }
+    return this.finish(said, "Right away, sir. I'll have Claude handle that.", source, begin, "claude_task");
+  }
+
+  private controlClaude(action: NonNullable<ReturnType<typeof claudeAction>>, said: string, begin: number): Reply | null {
+    const claude = this.ctx.claude;
+    if (!claude) return null;
+    const answer = (say: string) => this.finish(said, say, "fast", begin, "claude_control");
+    if (!claude.openProject) {
+      if (action.act === "terminal") return null; // Plain "open a terminal" still opens the app.
+      return answer("No project is open, sir. Tell me which one to start.");
+    }
+    const busy = "Claude is in the middle of something, sir. I'll need it to finish first.";
+    switch (action.act) {
+      case "effort":
+        return answer(claude.setEffort?.(action.level) ? `Effort set to ${action.level}, sir.` : busy);
+      case "model": {
+        const label = claude.setModel?.(action.name);
+        return answer(label ? `Switching to ${label}, sir.` : busy);
+      }
+      case "session":
+        claude.newSession?.();
+        return answer("New session ready, sir.");
+      case "terminal":
+        claude.newTerminal?.();
+        return answer("New terminal open, sir.");
+      case "archive": {
+        const title = claude.archive?.();
+        return answer(title ? `${title} is archived, sir.` : busy);
+      }
+      case "hide":
+        claude.setVisible?.(false);
+        return answer("Claude is minimized, sir.");
+      case "show":
+        claude.setVisible?.(true);
+        return answer("Here's Claude, sir.");
+    }
+  }
+
   private finish(said: string, say: string, source: Reply["source"], begin: number, tool?: string): Reply {
     this.remember(said, say);
     this.memory?.addTurn("user", said);
@@ -249,6 +297,9 @@ export class Jarvis {
     }
     if (this.pending) {
       const { command, level } = this.pending;
+      if (level === "confirm" && isPlainYes(said)) {
+        return { say: "This one is dangerous, sir, so I need you to say confirm, or cancel.", source: "fast", pending: this.pending, ms: Date.now() - begin };
+      }
       this.pending = null;
       if (!isApproval(said, level)) {
         log({ said, command, level, approved: false });
@@ -317,6 +368,22 @@ export class Jarvis {
       return { ...reply, listen: true };
     }
 
+    const control = claudeAction(said);
+    if (control) {
+      const reply = this.controlClaude(control, said, begin);
+      if (reply) return reply;
+    }
+
+    // Several plain commands in one breath all get done, in order.
+    const parts = splitCommands(said);
+    if (parts) {
+      const replies: Reply[] = [];
+      for (const part of parts) replies.push(await this.handle(part));
+      const say = replies.map((reply) => reply.say).join(" ");
+      const waiting = replies.find((reply) => reply.pending);
+      return { say, spoken: replies.map((reply) => reply.spoken ?? reply.say).join(" "), source: "fast", tool: "several", pending: waiting?.pending, ms: Date.now() - begin };
+    }
+
     if (looksLikeCoding(said)) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
 
     const quick = fastPath(said);
@@ -336,6 +403,10 @@ export class Jarvis {
       // Conversation does use earlier chat, with no tools, so it can't act by accident.
       const needsChat = call !== null || this.history.length > 0;
       const answer = needsChat ? (await askModel([...this.history, request], notes, false)).content : content;
+      // The small model gave up on a request, so the one that can do it gets it.
+      if (this.ctx.claude && /\b(can'?t|cannot|unable|not able|don'?t have (access|the ability))\b/i.test(answer) && !/\?\s*$/.test(said)) {
+        return this.handToClaude(said, "model", begin);
+      }
       return this.finish(said, speakable(answer) || "I didn't catch that, sir.", "model", begin);
     } catch (error) {
       log({ said, error: String(error) });

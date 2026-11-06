@@ -76,7 +76,7 @@ export type Snapshot = {
 };
 export type Permission = { id: number; session: string; command: string; shell: boolean };
 
-type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean };
+type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean };
 type Stored = { id: string; title: string; archived: boolean; updated: number };
 
 type Listeners = {
@@ -220,6 +220,20 @@ export class ClaudeManager {
     this.changed();
   }
 
+  // The menu starts on "No, exit", so yes means one step down before Enter.
+  answerTrust(allow: boolean) {
+    const session = [...this.sessions.values()].find((item) => item.needsTrust);
+    if (!session?.pty) return;
+    session.needsTrust = false;
+    if (!allow) {
+      this.closeProject();
+      return;
+    }
+    session.pty.write("\x1b[B");
+    setTimeout(() => session.pty?.write("\r"), 300);
+    this.changed();
+  }
+
   answerPermission(id: number, allow: boolean) {
     const socket = this.waiting.get(id);
     if (!socket) return;
@@ -246,6 +260,16 @@ export class ClaudeManager {
     pty.onData((data) => {
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
       this.on.data(session.id, data);
+      // Claude asks this before it starts. The user answers through Jarvis.
+      if (session.kind === "claude" && !session.ready && !session.trustAsked) {
+        const screen = session.buffer.slice(-6000).replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g, "").replace(/\s/g, "");
+        if (/Yes,?Itrustthisfolder/i.test(screen)) {
+          session.trustAsked = true;
+          session.needsTrust = true;
+          this.changed();
+          if (this.project) this.on.trustNeeded(this.project);
+        }
+      }
     });
     pty.onExit(() => {
       if (session.pty !== pty) return;
@@ -262,7 +286,7 @@ export class ClaudeManager {
   private blank(id: string, kind: Session["kind"], title: string): Session {
     return {
       id, kind, title, state: "running", working: false, needsTrust: false, model: null, effort: null, context: null,
-      tokens: null, minutes: 0, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell",
+      tokens: null, minutes: 0, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false,
     };
   }
 
@@ -273,14 +297,6 @@ export class ClaudeManager {
     if (session.effort) args.push("--effort", session.effort);
     session.ready = false;
     this.spawnInto(session, "claude", args);
-    // Claude asks about folders it hasn't seen, and that answer belongs to the user.
-    setTimeout(() => {
-      if (!session.ready && session.pty) {
-        session.needsTrust = true;
-        this.changed();
-        if (this.project) this.on.trustNeeded(this.project);
-      }
-    }, 7000).unref();
   }
 
   open(project: string, path: string) {
@@ -443,6 +459,14 @@ export class ClaudeManager {
     const session = this.currentClaude();
     if (!session || !EFFORTS.includes(level)) return false;
     return this.setEffort(session.id, level);
+  }
+
+  archiveActive(): string | null {
+    const session = this.currentClaude();
+    if (!session || session.working) return null;
+    const title = session.title;
+    this.archive(session.id);
+    return title;
   }
 
   // ---- Remembering sessions between runs -----------------------------------

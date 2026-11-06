@@ -34,3 +34,9 @@ export function isApproval(answer: string, level: Level): boolean {
   if (level === "confirm") return /^(yes,? )?(confirm|do it|proceed)( it)?$/.test(text);
   return /^(yes|yeah|yep|ok|okay|sure|go ahead|do it|confirm|proceed)$/.test(text);
 }
+
+// A plain "yes" to something that needs "confirm" should ask again, not count as a no.
+export const isPlainYes = (answer: string) => /^(yes|yeah|yep|ok|okay|sure|go ahead)(,? sir)?[.!]?$/i.test(answer.trim());
+
+// Claude writing a file with ">" is normal work. Writes to system folders are still caught.
+export const classifyForClaude = (command: string): Level => classify(command.replace(/>/g, " "));
