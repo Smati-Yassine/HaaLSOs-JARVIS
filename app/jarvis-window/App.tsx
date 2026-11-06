@@ -1,12 +1,16 @@
 import gsap from "gsap";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { ClaudePanel, type Snapshot } from "./ClaudePanel";
 import { Line, type Mood } from "./Line";
 
-type Pending = { command: string; level: "run" | "say-back" | "confirm"; options?: string[] };
+type Pending = { command: string; level: "run" | "say-back" | "confirm"; options?: string[]; title?: string };
 type Reply = { say: string; source: string; tool?: string; pending?: Pending; ms: number };
-type Message = { id: number; from: "jarvis" | "you"; text: string; pending?: Pending };
+type Turn = { role: "user" | "jarvis"; text: string };
+type Chat = { id: number; title: string; updated: number; turns: number };
+type Fact = { id: number; text: string };
+// A restored message is shown as it is, without the letters resolving again.
+type Message = { id: number; from: "jarvis" | "you"; text: string; restored?: boolean };
 type VoiceEvent = {
   type: string;
   text?: string;
@@ -16,11 +20,20 @@ type VoiceEvent = {
   message?: string;
 };
 type VoiceStatus = "off" | "loading" | "on" | "muted";
+type Tab = "chat" | "sessions" | "preferences";
 
 declare global {
   interface Window {
     jarvis: {
       ask(said: string): Promise<Reply>;
+      choose(index: number, label: string): Promise<Reply>;
+      resumeChat(): Promise<Turn[]>;
+      listChats(): Promise<{ chats: Chat[]; current: number | null }>;
+      openChat(id: number): Promise<Turn[]>;
+      newChat(): Promise<void>;
+      deleteChat(id: number): Promise<void>;
+      listFacts(): Promise<Fact[]>;
+      deleteFact(id: number): Promise<void>;
       warmUp(): Promise<boolean>;
       welcome(text: string): Promise<void>;
       setTheme(mode: "dark" | "light"): Promise<void>;
@@ -49,6 +62,17 @@ function savedMode(): "dark" | "light" {
     return "dark";
   }
 }
+
+function whenWas(time: number): string {
+  const minutes = Math.round((Date.now() - time) / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 1440) return `${Math.round(minutes / 60)} h ago`;
+  if (minutes < 2880) return "yesterday";
+  return new Date(time).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+const asMessages = (turns: Turn[]): Message[] => turns.map((turn) => ({ id: nextId++, from: turn.role === "user" ? "you" : "jarvis", text: turn.text, restored: true }));
 
 // Jarvis's words resolve out of scrambled letters as he says them.
 function Spoken({ text, onDone }: { text: string; onDone?: () => void }) {
@@ -83,15 +107,194 @@ function Spoken({ text, onDone }: { text: string; onDone?: () => void }) {
   return <p aria-label={text}>{shown}</p>;
 }
 
+// A decision sits above the message box, so it can't scroll away while Claude waits on it.
+function Decision({ pending, onChoose, onSay }: { pending: Pending; onChoose(index: number, label: string): void; onSay(text: string): void }) {
+  const danger = pending.level === "confirm";
+  const options = pending.options;
+  return (
+    <section className={`decision ${danger ? "danger" : ""}`} aria-label="Your decision is needed">
+      <h3>{pending.title ?? (danger ? "This one is dangerous. Run it?" : "Shall I run this?")}</h3>
+      {pending.command && <code>{pending.command}</code>}
+      <div className="decision-options">
+        {options ? options.map((option, index) => (
+          <button
+            key={option}
+            type="button"
+            className={danger && /^yes\b/i.test(option) ? "alarm" : ""}
+            onClick={() => onChoose(index, option)}
+          >
+            <kbd>{index + 1}</kbd>
+            <span>{option}</span>
+          </button>
+        )) : (
+          <button type="button" className={danger ? "alarm" : ""} onClick={() => onSay(danger ? "confirm" : "yes")}>
+            <kbd>1</kbd>
+            <span>{danger ? "Confirm" : "Go ahead"}</span>
+          </button>
+        )}
+      </div>
+      <button type="button" className="decision-cancel" onClick={() => onSay("cancel")}><kbd>Esc</kbd> Cancel</button>
+    </section>
+  );
+}
+
+function Sessions({ open, onOpen, onNew }: { open: boolean; onOpen(id: number): void; onNew(): void }) {
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [current, setCurrent] = useState<number | null>(null);
+  const [confirming, setConfirming] = useState<number | null>(null);
+  const refresh = useCallback(() => {
+    window.jarvis.listChats().then((list) => {
+      setChats(list.chats);
+      setCurrent(list.current);
+    });
+  }, []);
+  useEffect(() => {
+    if (open) refresh();
+    setConfirming(null);
+  }, [open, refresh]);
+  return (
+    <div className="sessions" hidden={!open}>
+      <button type="button" className="new-chat" onClick={onNew}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+        New conversation
+      </button>
+      {chats.length === 0 && <p className="sessions-empty">Nothing here yet, sir. Conversations will appear once we've had one.</p>}
+      <ul>
+        {chats.map((chat) => (
+          <li key={chat.id} className={chat.id === current ? "on" : ""}>
+            {confirming === chat.id ? (
+              <div className="chat-confirm">
+                <span>Delete this for good?</span>
+                <button
+                  type="button"
+                  className="alarm"
+                  onClick={() => {
+                    setConfirming(null);
+                    window.jarvis.deleteChat(chat.id).then(() => {
+                      refresh();
+                      if (chat.id === current) onNew();
+                    });
+                  }}
+                >
+                  Delete
+                </button>
+                <button type="button" onClick={() => setConfirming(null)}>Keep</button>
+              </div>
+            ) : (
+              <>
+                <button type="button" className="chat-open" onClick={() => onOpen(chat.id)}>
+                  <span className="chat-title">{chat.title}</span>
+                  <span className="chat-meta">{chat.id === current ? "Current · " : ""}{whenWas(chat.updated)} · {chat.turns} {chat.turns === 1 ? "line" : "lines"}</span>
+                </button>
+                <button type="button" className="row-delete" aria-label={`Delete ${chat.title}`} title="Delete" onClick={() => setConfirming(chat.id)}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg>
+                </button>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function Setting({ title, about, children }: { title: string; about: string; children: ReactNode }) {
+  return (
+    <div className="setting">
+      <div>
+        <h3>{title}</h3>
+        <p>{about}</p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Preferences({ open, mode, setMode, autostart, setAutostart, bypass }: {
+  open: boolean;
+  mode: "dark" | "light";
+  setMode(mode: "dark" | "light"): void;
+  autostart: boolean;
+  setAutostart(on: boolean): void;
+  bypass: boolean;
+}) {
+  const [warning, setWarning] = useState(false);
+  const [facts, setFacts] = useState<Fact[]>([]);
+  useEffect(() => {
+    if (open) window.jarvis.listFacts().then(setFacts);
+    setWarning(false);
+  }, [open]);
+  return (
+    <div className="preferences" hidden={!open}>
+      <h2>Jarvis</h2>
+      <Setting title="Appearance" about="Dark, or a warm champagne.">
+        <div className="segments" role="group" aria-label="Appearance">
+          {(["dark", "light"] as const).map((name) => (
+            <button key={name} type="button" aria-pressed={mode === name} onClick={() => setMode(name)}>{name === "dark" ? "Dark" : "Light"}</button>
+          ))}
+        </div>
+      </Setting>
+      <Setting title="Start with your computer" about="Opens Jarvis when you log in.">
+        <div className="segments" role="group" aria-label="Start with your computer">
+          {[true, false].map((enabled) => (
+            <button key={String(enabled)} type="button" aria-pressed={autostart === enabled} onClick={() => window.jarvis.setAutostart(enabled).then(setAutostart)}>{enabled ? "On" : "Off"}</button>
+          ))}
+        </div>
+      </Setting>
+
+      <h2>Claude</h2>
+      <Setting title="Permissions" about={bypass ? "Bypass is on. Claude runs commands without asking." : "Claude asks before running commands or changing files."}>
+        <div className="segments" role="group" aria-label="Claude permissions">
+          <button type="button" aria-pressed={!bypass} onClick={() => { setWarning(false); window.claude.setBypass(false); }}>Ask me</button>
+          <button type="button" className={bypass ? "danger-on" : ""} aria-pressed={bypass} onClick={() => !bypass && setWarning(true)}>Bypass</button>
+        </div>
+      </Setting>
+      {warning && (
+        <div className="warning" role="alert">
+          <h3>Let Claude act without asking?</h3>
+          <p>
+            Claude will run any command and change any file without checking with you. This computer has passwordless sudo, so
+            a mistake, or a malicious instruction hidden in a web page or file Claude reads, could change or delete anything on
+            it, with no prompt to stop it.
+          </p>
+          <div>
+            <button type="button" className="alarm" onClick={() => { setWarning(false); window.claude.setBypass(true); }}>Turn on bypass</button>
+            <button type="button" onClick={() => setWarning(false)}>Keep asking me</button>
+          </div>
+        </div>
+      )}
+
+      <h2>Memory</h2>
+      <p className="pref-about">What Jarvis has picked up about you, or was told to remember. It stays on this computer. Deleting removes it for good.</p>
+      {facts.length === 0 && <p className="pref-about">Nothing yet.</p>}
+      <ul className="facts">
+        {facts.map((fact) => (
+          <li key={fact.id}>
+            <span>{fact.text}</span>
+            <button
+              type="button"
+              className="row-delete"
+              aria-label={`Forget: ${fact.text}`}
+              title="Forget this"
+              onClick={() => window.jarvis.deleteFact(fact.id).then(() => window.jarvis.listFacts()).then(setFacts)}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(true);
   const [mood, setMood] = useState<Mood>("idle");
   const [pulse, setPulse] = useState(0);
-  const [tab, setTab] = useState<"chat" | "preferences">("chat");
+  const [tab, setTab] = useState<Tab>("chat");
   const [mode, setMode] = useState(savedMode);
-  const [hints, setHints] = useState(true);
   const [pending, setPending] = useState<Pending | null>(null);
   const [voice, setVoice] = useState<VoiceStatus>("off");
   const voiceRef = useRef<VoiceStatus>("off");
@@ -99,7 +302,7 @@ export function App() {
   const [claude, setClaude] = useState<Snapshot | null>(null);
   const [panelHidden, setPanelHidden] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
-  const input = useRef<HTMLInputElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
   const stopSpeaking = useRef(0);
 
   useEffect(() => {
@@ -115,10 +318,18 @@ export function App() {
   const scrollDown = useCallback(() => {
     if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
   }, []);
-  useLayoutEffect(scrollDown, [messages, tab, scrollDown]);
+  useLayoutEffect(scrollDown, [messages, tab, pending, busy, scrollDown]);
+
+  // The box grows with what's written, up to a limit, then scrolls.
+  useLayoutEffect(() => {
+    const box = input.current;
+    if (!box) return;
+    box.style.height = "auto";
+    box.style.height = `${Math.min(box.scrollHeight, 200)}px`;
+  }, [draft, tab]);
 
   const speak = useCallback((text: string, withPending?: Pending) => {
-    setMessages((list) => [...list, { id: nextId++, from: "jarvis", text, pending: withPending }]);
+    setMessages((list) => [...list, { id: nextId++, from: "jarvis", text }]);
     setPending(withPending ?? null);
     // With a voice, the line follows the real sound. Without one, it estimates.
     if (voiceRef.current === "on" || voiceRef.current === "muted" || voiceRef.current === "loading") return;
@@ -153,12 +364,10 @@ export function App() {
           updateVoice("loading");
           break;
         case "wake":
-          setHints(false);
           setMood("listening");
           break;
         case "heard":
           if (event.text) {
-            setHints(false);
             setBusy(true);
             setPending(null);
             setMood("thinking");
@@ -174,6 +383,11 @@ export function App() {
         case "reply":
           speak(event.reply!.say, event.reply!.pending);
           setBusy(false);
+          break;
+        case "chat-reset":
+          setMessages([]);
+          setPending(null);
+          setTab("chat");
           break;
         case "speaking":
           setMood(event.active ? "speaking" : "idle");
@@ -204,6 +418,7 @@ export function App() {
   useEffect(() => {
     let alive = true;
     const started = Date.now();
+    window.jarvis.resumeChat().then((turns) => alive && setMessages((list) => [...asMessages(turns), ...list]));
     window.jarvis.warmUp().then((ready) => {
       if (!alive) return;
       window.setTimeout(() => {
@@ -228,7 +443,6 @@ export function App() {
     async (text: string) => {
       const said = text.trim();
       if (!said || busy) return;
-      setHints(false);
       setBusy(true);
       setPending(null);
       setMood("thinking");
@@ -245,6 +459,67 @@ export function App() {
     },
     [busy, speak],
   );
+
+  const choose = useCallback(
+    async (index: number, label: string) => {
+      setPending(null);
+      setMessages((list) => [...list, { id: nextId++, from: "you", text: label }]);
+      const reply = await window.jarvis.choose(index, label);
+      speak(reply.say, reply.pending);
+      input.current?.focus();
+    },
+    [speak],
+  );
+
+  // A number picks a choice and Esc cancels, unless he's in the middle of writing something.
+  useEffect(() => {
+    if (!pending) return;
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.(".terminal-host")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        send("cancel");
+        return;
+      }
+      if (draft || event.ctrlKey || event.altKey || event.metaKey || !/^[1-9]$/.test(event.key)) return;
+      const index = Number(event.key) - 1;
+      event.preventDefault();
+      if (pending.options) {
+        if (pending.options[index]) choose(index, pending.options[index]);
+      } else if (index === 0) {
+        send(pending.level === "confirm" ? "confirm" : "yes");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pending, draft, send, choose]);
+
+  const submit = () => {
+    if (busy || !draft.trim()) return;
+    const value = draft;
+    setDraft("");
+    setMood((now) => (now === "listening" ? "idle" : now));
+    send(value);
+  };
+
+  const openChat = useCallback((id: number) => {
+    window.jarvis.openChat(id).then((turns) => {
+      setMessages(asMessages(turns));
+      setPending(null);
+      setTab("chat");
+      input.current?.focus();
+    });
+  }, []);
+
+  const newChat = useCallback(() => {
+    window.jarvis.newChat().then(() => {
+      setMessages([]);
+      setPending(null);
+      setTab("chat");
+      input.current?.focus();
+    });
+  }, []);
 
   const panelOpen = Boolean(openProject) && !panelHidden;
   return (
@@ -269,6 +544,7 @@ export function App() {
       <section className="talk" aria-label="Conversation with Jarvis">
         <div className="tabs">
           <button type="button" aria-selected={tab === "chat"} onClick={() => setTab("chat")}>Chat</button>
+          <button type="button" aria-selected={tab === "sessions"} onClick={() => setTab("sessions")}>Sessions</button>
           <span className="tabs-gap" />
           {openProject && (
             <button
@@ -303,39 +579,19 @@ export function App() {
                 {messages.map((message) => (
                   <div key={message.id} className={`message ${message.from}`}>
                     <small>{message.from === "jarvis" ? "Jarvis" : "You"}</small>
-                    {message.from === "jarvis" ? <Spoken text={message.text} onDone={scrollDown} /> : <p>{message.text}</p>}
-                    {message.pending && pending === message.pending && (
-                      <div className="choices">
-                        {message.pending.options ? (
-                          <>
-                            {message.pending.options.map((option, index) => (
-                              <button key={option} type="button" className="choice" onClick={() => send(option)}>
-                                {index + 1}. {option}
-                              </button>
-                            ))}
-                            <button type="button" className="choice" onClick={() => send("cancel")}>Cancel</button>
-                          </>
-                        ) : (
-                          <>
-                            <code>{message.pending.command}</code>
-                            <button
-                              type="button"
-                              className={message.pending.level === "confirm" ? "choice danger" : "choice"}
-                              onClick={() => send(message.pending!.level === "confirm" ? "confirm" : "yes")}
-                            >
-                              {message.pending.level === "confirm" ? "Confirm" : "Go ahead"}
-                            </button>
-                            <button type="button" className="choice" onClick={() => send("cancel")}>Cancel</button>
-                          </>
-                        )}
-                      </div>
-                    )}
+                    {message.from === "jarvis" && !message.restored ? <Spoken text={message.text} onDone={scrollDown} /> : <p>{message.text}</p>}
                   </div>
                 ))}
+                {busy && (
+                  <div className="thinking" role="status" aria-label="Jarvis is thinking">
+                    <i /><i /><i />
+                  </div>
+                )}
               </div>
             </div>
             <div className="bottom">
-              {hints && (
+              {pending && <Decision pending={pending} onChoose={choose} onSay={send} />}
+              {messages.length <= 1 && !pending && (
                 <div className="hints">
                   {HINTS.map((hint) => (
                     <button key={hint} type="button" onClick={() => send(hint)}>
@@ -348,10 +604,7 @@ export function App() {
                 className="ask"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  const value = draft;
-                  setDraft("");
-                  setMood((now) => (now === "listening" ? "idle" : now));
-                  send(value);
+                  submit();
                 }}
               >
                 <button
@@ -373,8 +626,9 @@ export function App() {
                     {voice === "muted" && <path d="M4 4l16 16" />}
                   </svg>
                 </button>
-                <input
+                <textarea
                   ref={input}
+                  rows={1}
                   value={draft}
                   autoComplete="off"
                   placeholder={voice === "on" ? 'Say "Hey Jarvis" or type' : voice === "loading" ? "Voice is loading. You can type" : voice === "muted" ? "Microphone off. Type to Jarvis" : "Type to Jarvis"}
@@ -384,43 +638,30 @@ export function App() {
                     setPulse((value) => value + 1);
                     setMood((now) => (now === "idle" || now === "listening" ? (event.target.value ? "listening" : "idle") : now));
                   }}
+                  onKeyDown={(event) => {
+                    // Enter sends and Shift+Enter starts a new line. Enter also has to wait while
+                    // an accent or other composed character is being typed.
+                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault();
+                      submit();
+                    }
+                  }}
                 />
-                <button className="send" type="submit" disabled={busy} aria-label="Send">
+                <button className="send" type="submit" disabled={busy || !draft.trim()} aria-label="Send" title="Send (Enter). Shift+Enter starts a new line.">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                    <path d="M5 12h14M13 6l6 6-6 6" />
+                    <path d="M12 19V5M6 11l6-6 6 6" />
                   </svg>
                 </button>
               </form>
             </div>
         </div>
-        <div className="preferences" hidden={tab !== "preferences"}>
-            <h2 id="appearance">Appearance</h2>
-            <div className="segments" role="group" aria-labelledby="appearance">
-              {(["dark", "light"] as const).map((name) => (
-                <button key={name} type="button" aria-pressed={mode === name} onClick={() => setMode(name)}>
-                  {name === "dark" ? "Dark" : "Light"}
-                </button>
-              ))}
-            </div>
-            <h2 id="login" className="pref-gap">Start with your computer</h2>
-            <div className="segments" role="group" aria-labelledby="login">
-              {[true, false].map((enabled) => (
-                <button
-                  key={String(enabled)}
-                  type="button"
-                  aria-pressed={autostart === enabled}
-                  onClick={() => window.jarvis.setAutostart(enabled).then(setAutostart)}
-                >
-                  {enabled ? "On" : "Off"}
-                </button>
-              ))}
-            </div>
-        </div>
+        <Sessions open={tab === "sessions"} onOpen={openChat} onNew={newChat} />
+        <Preferences open={tab === "preferences"} mode={mode} setMode={setMode} autostart={autostart} setAutostart={setAutostart} bypass={Boolean(claude?.bypass)} />
       </section>
     </div>
     {openProject && claude && (
       <div className="panel-slot" hidden={panelHidden}>
-        <ClaudePanel snap={claude} mode={mode} onMinimize={() => setPanelHidden(true)} />
+        <ClaudePanel snap={claude} mode={mode} asking={Boolean(pending)} onMinimize={() => setPanelHidden(true)} />
       </div>
     )}
     </div>

@@ -26,6 +26,7 @@ export type Snapshot = {
   plan: { fiveHour: number | null; fiveHourResets: number | null; week: number | null; weekResets: number | null };
   models: { id: string; label: string }[];
   efforts: string[];
+  bypass: boolean;
 };
 
 declare global {
@@ -42,6 +43,7 @@ declare global {
       newTerminal(): void;
       setModel(id: string, model: string): void;
       setEffort(id: string, effort: string): void;
+      setBypass(on: boolean): void;
       closeProject(): void;
       onChange(listener: (snapshot: Snapshot) => void): () => void;
       onData(listener: (id: string, data: string) => void): () => void;
@@ -118,7 +120,7 @@ function Meter({ label, value, warm, hint }: { label: string; value: number | nu
   );
 }
 
-export function ClaudePanel({ snap, mode, onMinimize }: { snap: Snapshot; mode: "dark" | "light"; onMinimize(): void }) {
+export function ClaudePanel({ snap, mode, asking, onMinimize }: { snap: Snapshot; mode: "dark" | "light"; asking: boolean; onMinimize(): void }) {
   const [showArchived, setShowArchived] = useState(false);
   const area = useRef<HTMLDivElement>(null);
 
@@ -136,14 +138,15 @@ export function ClaudePanel({ snap, mode, onMinimize }: { snap: Snapshot; mode: 
   // Esc stops Claude wherever the cursor is, not only inside the terminal.
   const workingId = snap.sessions.find((session) => session.working)?.id;
   useEffect(() => {
-    if (!workingId) return;
+    // While Jarvis is showing one of Claude's questions, Esc answers that instead.
+    if (!workingId || asking) return;
     const onKey = (event: KeyboardEvent) => {
       const inTerminal = (event.target as HTMLElement | null)?.closest?.(".terminal-host");
       if (event.key === "Escape" && !inTerminal) window.claude.write(workingId, "\x1b");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [workingId]);
+  }, [workingId, asking]);
 
   const liveIds = snap.sessions.filter((session) => session.state === "running").map((session) => session.id).join(",");
   const active = snap.sessions.find((session) => session.id === snap.active) ?? null;
@@ -186,7 +189,7 @@ export function ClaudePanel({ snap, mode, onMinimize }: { snap: Snapshot; mode: 
         <span className="sep">/</span>
         <span className="project">{snap.project}</span>
         <span className="path">{snap.path}</span>
-        <button className="win" type="button" aria-label="Minimize Claude to the bubble" title="Minimize to the bubble" onClick={onMinimize}>&minus;</button>
+        <button className="win" type="button" aria-label="Hide Claude" title="Hide Claude" onClick={onMinimize}>&minus;</button>
         <button className="win close" type="button" onClick={() => window.claude.closeProject()}>Close project</button>
       </header>
       <div className="work">
@@ -248,7 +251,7 @@ export function ClaudePanel({ snap, mode, onMinimize }: { snap: Snapshot; mode: 
             </label>
             <Meter label="Context" value={active.context} />
             <span className="stat">{active.minutes} min{active.tokens !== null ? ` · ${Math.round(active.tokens / 1000)}k tokens` : ""}</span>
-            {active.needsTrust && <span className="note">Claude is asking about this folder. Answer in the terminal.</span>}
+            {snap.bypass && <span className="bypass-tag" title="Claude runs commands without asking. Change this in Preferences.">Bypass on</span>}
           </>
         ) : active ? (
           <span>Plain terminal. Jarvis and Claude can't see or touch it.</span>

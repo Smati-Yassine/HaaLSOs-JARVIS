@@ -6,14 +6,18 @@ import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import headless from "@xterm/headless";
 import { spawn, type IPty } from "node-pty";
 
-const HOME = join(homedir(), ".Jarvis");
+type Screen = InstanceType<typeof headless.Terminal>;
+
+const HOME = process.env.JARVIS_HOME || join(homedir(), ".Jarvis");
 const RUN = join(HOME, "run");
 const SOCKET = join(RUN, "claude.sock");
 const BRIDGE = join(RUN, "bridge.py");
 const SETTINGS = join(RUN, "claude-settings.json");
 const STORE = join(HOME, "claude-sessions.json");
+const PREFERENCES = join(HOME, "preferences.json");
 const MAX_BUFFER = 400_000;
 
 export const MODELS = [
@@ -62,11 +66,15 @@ export type Snapshot = {
   plan: { fiveHour: number | null; fiveHourResets: number | null; week: number | null; weekResets: number | null };
   models: typeof MODELS;
   efforts: string[];
+  bypass: boolean;
 };
-export type Permission = { session: string; command: string; shell: boolean };
+// Claude's own menu, read off its screen, so every choice it offers reaches the chat.
+export type Menu = { question: string | null; options: string[] };
+export type Gate = "trust" | "bypass";
+export type Permission = { session: string; command: string; shell: boolean; menu: Menu | null };
 export type Question = { question: string; options: string[]; simple: boolean };
 
-type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean; leftoverInput: boolean };
+type Session = SessionView & { pty: IPty | null; buffer: string; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number };
 type Stored = { id: string; title: string; archived: boolean; updated: number };
 
 type Listeners = {
@@ -77,7 +85,7 @@ type Listeners = {
   // Something Jarvis was asking about got answered or moved on, possibly in the terminal.
   settled(session: string): void;
   finished(session: string, message: string): void;
-  trustNeeded(project: string): void;
+  gate(project: string, gate: Gate): void;
 };
 
 // Which answer the trust menu has selected, read from the latest screen.
@@ -86,9 +94,39 @@ export function trustSelection(buffer: string): "yes" | "no" | null {
   const at = screen.lastIndexOf("❯");
   if (at < 0) return null;
   const after = screen.slice(at + 1, at + 40).replace(/^\d+\./, "");
-  if (/^Yes,?Itrust/i.test(after)) return "yes";
+  if (/^Yes,?I(trust|accept)/i.test(after)) return "yes";
   if (/^No,?exit/i.test(after)) return "no";
   return null;
+}
+
+// Finds the numbered menu with the selection arrow in it. A row may wrap onto further lines.
+export function readMenu(lines: string[]): Menu | null {
+  const rows = lines.map((line) => line.replace(/^[\s│]+|[\s│]+$/g, ""));
+  let arrow = -1;
+  for (let at = rows.length - 1; at >= 0 && arrow < 0; at--) if (/^❯\s*\d+\.\s/.test(rows[at])) arrow = at;
+  if (arrow < 0) return null;
+  let first = arrow;
+  for (let at = arrow; at >= 0 && arrow - at < 30; at--) {
+    if (/^(❯\s*)?1\.\s/.test(rows[at])) {
+      first = at;
+      break;
+    }
+  }
+  if (!/^(❯\s*)?1\.\s/.test(rows[first])) return null;
+  const options: string[] = [];
+  for (let at = first; at < rows.length; at++) {
+    const option = rows[at].match(/^(?:❯\s*)?(\d+)\.\s+(.+)$/);
+    if (option && Number(option[1]) === options.length + 1) options.push(option[2]);
+    else if (!rows[at] || /^(esc|enter|tab)\b/i.test(rows[at])) break;
+    else options[options.length - 1] += ` ${rows[at]}`;
+  }
+  if (options.length < 2) return null;
+  let question: string | null = null;
+  for (let at = first - 1; at >= 0 && question === null; at--) if (rows[at]) question = rows[at].endsWith("?") ? rows[at] : "";
+  return {
+    question: question || null,
+    options: options.map((option) => option.replace(/\s*\((shift\+tab|esc)\)$/i, "").replace(/\s+/g, " ").trim()),
+  };
 }
 
 function describe(tool: string, input: Record<string, unknown>): { text: string; shell: boolean } {
@@ -108,10 +146,25 @@ export class ClaudeManager {
   // A restarted session has to come back at the size of the window, or its screen garbles.
   private cols = 100;
   private rows = 30;
+  private bypass = false;
   private readonly on: Listeners;
 
   constructor(listeners: Listeners) {
     this.on = listeners;
+    try {
+      this.bypass = JSON.parse(readFileSync(PREFERENCES, "utf8")).bypass === true;
+    } catch {
+      // No saved choice yet, so Claude keeps asking.
+    }
+  }
+
+  // Applies to sessions from now on, and to idle ones straight away. A busy one finishes first.
+  setBypass(on: boolean) {
+    this.bypass = on;
+    mkdirSync(HOME, { recursive: true, mode: 0o700 });
+    writeFileSync(PREFERENCES, JSON.stringify({ bypass: on }), { mode: 0o600 });
+    for (const session of this.sessions.values()) if (session.pty) this.relaunch(session);
+    this.changed();
   }
 
   start() {
@@ -208,6 +261,7 @@ export class ClaudeManager {
       case "Stop":
         if (session) {
           session.working = false;
+          session.askSeq += 1;
           this.on.settled(session.id);
           this.on.finished(session.id, String(data.last_assistant_message ?? ""));
         }
@@ -218,7 +272,18 @@ export class ClaudeManager {
       case "PermissionRequest": {
         if (data.tool_name === "AskUserQuestion") return;
         const what = describe(String(data.tool_name), data.tool_input ?? {});
-        this.on.permission({ session: data.session_id, command: what.text, shell: what.shell });
+        // The hook runs just before the menu is drawn, so give it a moment to appear.
+        const seq = session ? ++session.askSeq : 0;
+        const began = Date.now();
+        const look = () => {
+          if (session && session.askSeq !== seq) return; // Already answered in the terminal.
+          const menu = this.menu(data.session_id);
+          // A file inside the project reads better without the whole path in front of it.
+          const command = !what.shell && this.path ? what.text.replace(`${this.path}/`, "") : what.text;
+          if (menu || Date.now() - began > 2500) this.on.permission({ session: data.session_id, command, shell: what.shell, menu });
+          else setTimeout(look, 100);
+        };
+        look();
         return;
       }
       case "PreToolUse": {
@@ -234,21 +299,28 @@ export class ClaudeManager {
         return;
       }
       case "PostToolUse":
-        if (session) session.working = true; // It carried on, even if Esc only closed a menu.
+        if (session) {
+          session.working = true; // It carried on, even if Esc only closed a menu.
+          session.askSeq += 1;
+        }
         this.on.settled(data.session_id);
         return;
     }
     this.changed();
   }
 
-  // The menu starts on "No, exit". Keys sent before it's ready get lost, and Enter would then
+  // These menus start on "No, exit". Keys sent before one is ready get lost, and Enter would then
   // choose No, so Enter is only pressed once the screen shows Yes selected.
-  answerTrust(allow: boolean, onFail?: () => void) {
+  answerGate(allow: boolean, onFail?: () => void) {
     const session = [...this.sessions.values()].find((item) => item.needsTrust);
     if (!session?.pty) return;
+    const gate = session.gate;
     session.needsTrust = false;
+    session.gate = null;
     if (!allow) {
-      this.closeProject();
+      // Refusing the bypass warning only means going back to asking, not losing the project.
+      if (gate === "bypass") this.setBypass(false);
+      else this.closeProject();
       return;
     }
     let tries = 0;
@@ -260,20 +332,44 @@ export class ClaudeManager {
       }
       if (++tries > 20) {
         session.needsTrust = true;
+        session.gate = gate;
         this.changed();
         onFail?.();
         return;
       }
-      if (trustSelection(session.buffer) !== "yes") session.pty.write("\x1b[B");
+      session.pty.write("\x1b[B");
       setTimeout(step, 400);
     };
     setTimeout(step, 400);
     this.changed();
   }
 
-  // Answers Claude's own prompt on its screen, the same keys a person would press.
+  // What Claude's screen shows right now, as a person would see it.
+  menu(id: string): Menu | null {
+    const screen = this.sessions.get(id)?.screen;
+    if (!screen) return null;
+    const buffer = screen.buffer.active;
+    const lines: string[] = [];
+    for (let row = 0; row < screen.rows; row++) lines.push(buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? "");
+    return readMenu(lines);
+  }
+
+  // Claude treats a refusal like an interruption: it stops without saying so.
   answerPermission(id: string, allow: boolean) {
-    this.sessions.get(id)?.pty?.write(allow ? "1" : "\x1b");
+    const session = this.sessions.get(id);
+    session?.pty?.write(allow ? "1" : "\x1b");
+    if (session && !allow) this.markStopped(session);
+  }
+
+  // Presses the number only if that same choice is still on the screen, because otherwise the
+  // digit would land in Claude's input box.
+  answerMenu(id: string, index: number, label: string): boolean {
+    const session = this.sessions.get(id);
+    const menu = this.menu(id);
+    if (!session?.pty || menu?.options[index] !== label) return false;
+    session.pty.write(String(index + 1));
+    if (/^no\b/i.test(label)) this.markStopped(session);
+    return true;
   }
 
   answerChoice(id: string, index: number) {
@@ -284,6 +380,7 @@ export class ClaudeManager {
   private markStopped(session: Session) {
     session.working = false;
     session.leftoverInput = true; // Claude puts a stopped request back in its input box.
+    session.askSeq += 1;
     this.on.settled(session.id);
     this.changed();
   }
@@ -314,15 +411,23 @@ export class ClaudeManager {
     session.state = "running";
     pty.onData((data) => {
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.screen?.write(data);
       this.on.data(session.id, data);
-      // Claude asks this before it starts. The user answers through Jarvis.
-      if (session.kind === "claude" && !session.ready && !session.trustAsked) {
+      // Claude asks these before it starts. The user answers through Jarvis.
+      if (session.kind === "claude" && !session.ready && !session.needsTrust) {
         const screen = session.buffer.slice(-6000).replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]|\x1b\][^\x07]*\x07/g, "").replace(/\s/g, "");
-        if (/Yes,?Itrustthisfolder/i.test(screen)) {
-          session.trustAsked = true;
+        const ask = (gate: Gate) => {
           session.needsTrust = true;
+          session.gate = gate;
           this.changed();
-          if (this.project) this.on.trustNeeded(this.project);
+          if (this.project) this.on.gate(this.project, gate);
+        };
+        if (!session.trustAsked && /Yes,?Itrustthisfolder/i.test(screen)) {
+          session.trustAsked = true;
+          ask("trust");
+        } else if (!session.bypassAsked && /Yes,?Iaccept/i.test(screen)) {
+          session.bypassAsked = true;
+          ask("bypass");
         }
       }
     });
@@ -341,12 +446,13 @@ export class ClaudeManager {
   private blank(id: string, kind: Session["kind"], title: string): Session {
     return {
       id, kind, title, state: "running", working: false, needsTrust: false, model: null, effort: null, context: null,
-      tokens: null, minutes: 0, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, leftoverInput: false,
+      tokens: null, minutes: 0, pty: null, buffer: "", queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, bypassAsked: false, gate: null, leftoverInput: false,
+      screen: kind === "claude" ? new headless.Terminal({ cols: this.cols, rows: this.rows, scrollback: 0, allowProposedApi: true }) : null, askSeq: 0,
     };
   }
 
   private launchClaude(session: Session, resume: boolean) {
-    const args = ["--permission-mode", "default", "--settings", SETTINGS];
+    const args = ["--permission-mode", this.bypass ? "bypassPermissions" : "default", "--settings", SETTINGS];
     args.push(...(resume ? ["--resume", session.id] : ["--session-id", session.id]));
     if (session.model) args.push("--model", session.model);
     if (session.effort) args.push("--effort", session.effort);
@@ -405,6 +511,7 @@ export class ClaudeManager {
       pty?.kill();
       session.state = "archived";
       session.working = false;
+      session.screen?.reset();
       this.remember(session);
     }
     if (this.active === id) {
@@ -426,6 +533,7 @@ export class ClaudeManager {
       const pty = session.pty;
       session.pty = null;
       pty?.kill();
+      session.screen?.dispose();
     }
     this.sessions.clear();
     this.project = null;
@@ -444,7 +552,9 @@ export class ClaudeManager {
     if (cols <= 0 || rows <= 0) return;
     this.cols = cols;
     this.rows = rows;
-    this.sessions.get(id)?.pty?.resize(cols, rows);
+    const session = this.sessions.get(id);
+    session?.pty?.resize(cols, rows);
+    session?.screen?.resize(cols, rows);
   }
 
   buffer(id: string) {
@@ -485,6 +595,7 @@ export class ClaudeManager {
     session.pty = null;
     pty?.kill();
     session.buffer = "";
+    session.screen?.reset();
     this.on.data(session.id, "\x1b[2J\x1b[3J\x1b[H");
     // A session that hasn't been used yet has no conversation to resume.
     this.launchClaude(session, session.title !== "New session");
@@ -551,8 +662,11 @@ export class ClaudeManager {
   }
 
   snapshot(): Snapshot {
-    const sessions = [...this.sessions.values()].map(({ pty: _pty, buffer: _buffer, queued: _queued, started: _started, ready: _ready, ...view }) => view);
-    return { project: this.project, path: this.path, sessions, active: this.active, plan: this.plan, models: MODELS, efforts: EFFORTS };
+    const sessions: SessionView[] = [...this.sessions.values()].map((session) => ({
+      id: session.id, kind: session.kind, title: session.title, state: session.state, working: session.working, needsTrust: session.needsTrust,
+      model: session.model, effort: session.effort, context: session.context, tokens: session.tokens, minutes: session.minutes,
+    }));
+    return { project: this.project, path: this.path, sessions, active: this.active, plan: this.plan, models: MODELS, efforts: EFFORTS, bypass: this.bypass };
   }
 
   private changed() {

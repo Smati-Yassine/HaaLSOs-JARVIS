@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { test } from "node:test";
 
-import { Jarvis, parseTextCall, pruneLog, scrubLog, speakable, toolFitsWords } from "./brain.ts";
+import { DatabaseSync } from "node:sqlite";
+
+import { isStatementAboutSelf, Jarvis, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
-import { trustSelection } from "./claude.ts";
-import { containsSecret, Memory, memoryCommand, searchTerms } from "./memory.ts";
+import { readMenu, trustSelection } from "./claude.ts";
+import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { findProject, projectInSentence, projectIntent } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
@@ -557,4 +559,163 @@ test("with a project open, change requests always go to Claude", async () => {
   const reply = await new Jarvis({ dryRun: false, claude, projects: () => MY_PROJECTS }).handle("fix the typo in the title");
   assert.equal(reply.tool, "ask_claude");
   assert.deepEqual(asked, ["fix the typo in the title"]);
+});
+
+test("Claude's real permission menu is read off its screen with every choice", () => {
+  const screen = [
+    "● Write(a.txt)",
+    " Create file",
+    " a.txt",
+    "╌╌╌╌╌╌",
+    "  1 hi",
+    "╌╌╌╌╌╌",
+    " Do you want to create a.txt?",
+    " ❯ 1. Yes",
+    "   2. Yes, and switch to accept edits (auto-approve file edits and common file ",
+    "      commands) for this session (shift+tab)",
+    "   3. No",
+    "",
+    " Esc to cancel · Tab to amend",
+  ];
+  assert.deepEqual(readMenu(screen), {
+    question: "Do you want to create a.txt?",
+    options: ["Yes", "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session", "No"],
+  });
+});
+
+test("a typed prompt or a numbered list on screen isn't mistaken for a menu", () => {
+  assert.equal(readMenu(["❯ 1. fix the login page", "", "  ? for shortcuts"]), null);
+  assert.equal(readMenu(["Here is the plan:", "1. Add a test", "2. Fix the bug", "", "❯ "]), null);
+});
+
+test("the bypass warning's menu is read like the trust menu", () => {
+  assert.equal(trustSelection("❯ No, exit\n  Yes, I accept"), "no");
+  assert.equal(trustSelection("  No, exit\n❯ Yes, I accept"), "yes");
+});
+
+test("conversations keep their own lines, and can be resumed and deleted", () => {
+  const memory = new Memory(":memory:");
+  memory.addTurn("jarvis", "said before anything was asked");
+  assert.deepEqual(memory.chats(), []);
+  memory.addTurn("user", "tell me about Mars", 1000);
+  memory.addTurn("jarvis", "It is red, sir.", 1001);
+  const first = memory.currentChat!;
+  memory.startChat();
+  memory.addTurn("user", "what about Venus", 2000);
+  const second = memory.currentChat!;
+  assert.deepEqual(memory.chats().map((chat) => [chat.id, chat.title, chat.turns]), [[second, "what about Venus", 1], [first, "tell me about Mars", 2]]);
+  assert.equal(memory.openChat(first), true);
+  assert.deepEqual(memory.chatTurns(first), [{ role: "user", text: "tell me about Mars" }, { role: "jarvis", text: "It is red, sir." }]);
+  assert.deepEqual(memory.recall("what about Venus"), ["what about Venus"]);
+  assert.deepEqual(memory.deleteChat(first), ["tell me about Mars"]);
+  assert.equal(memory.currentChat, null);
+  assert.deepEqual(memory.chats().map((chat) => chat.id), [second]);
+  assert.deepEqual(memory.said(0, 5000), ["what about Venus"]);
+  assert.equal(memory.openChat(first), false);
+});
+
+test("only a recent conversation carries on by itself", () => {
+  const memory = new Memory(":memory:");
+  memory.addTurn("user", "hello there", 1000);
+  memory.startChat();
+  assert.equal(memory.continueRecent(500, 2000), false);
+  assert.equal(memory.currentChat, null);
+  assert.equal(memory.continueRecent(5000, 2000), true);
+});
+
+test("an older memory file keeps everything and gains conversations and better search", () => {
+  const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-old-memory-"));
+  const path = joinPath(dir, "memory.sqlite");
+  const old = new DatabaseSync(path);
+  old.exec(`
+    CREATE TABLE facts (id INTEGER PRIMARY KEY, text TEXT NOT NULL, created INTEGER NOT NULL);
+    CREATE TABLE turns (id INTEGER PRIMARY KEY, role TEXT NOT NULL, text TEXT NOT NULL, created INTEGER NOT NULL);
+    CREATE VIRTUAL TABLE facts_search USING fts5(text, content='facts', content_rowid='id');
+    CREATE VIRTUAL TABLE turns_search USING fts5(text, content='turns', content_rowid='id');
+    INSERT INTO facts (text, created) VALUES ('my dentist is Dr Ben Ali', 1);
+    INSERT INTO turns (role, text, created) VALUES ('user', 'an old question', 5);
+  `);
+  old.close();
+  const memory = new Memory(path);
+  assert.deepEqual(memory.search("dentists"), ["my dentist is Dr Ben Ali"]);
+  assert.deepEqual(memory.chats().map((chat) => [chat.title, chat.turns]), [["Earlier conversations", 1]]);
+  memory.close();
+  rmSync(dir, { recursive: true });
+});
+
+test("a removed fact stays gone, and the list has no duplicates", () => {
+  const memory = new Memory(":memory:");
+  memory.remember("The user lives in Tunis");
+  memory.remember("the user lives in tunis");
+  const [fact] = memory.allFacts();
+  assert.equal(memory.allFacts().length, 1);
+  assert.equal(memory.forgetFact(fact.id), "The user lives in Tunis");
+  assert.deepEqual(memory.allFacts(), []);
+});
+
+test("lasting things he says are kept in his own words, and passing things aren't", () => {
+  for (const said of ["my name is Yassine", "I live in Tunis and I love pizza", "I'm allergic to peanuts", "my sister Amira lives in Paris", "I hate mornings", "I prefer dark mode", "I usually wake up at 7", "my laptop is an Asus"]) {
+    assert.deepEqual(lastingFacts(`${said}.`), [said], said);
+  }
+  for (const said of ["I'm a bit tired right now", "I just deleted my whole project by mistake", "I have a meeting at 3", "I think this is stupid", "my code is broken again", "I was at the gym today", "what is my name?", "my password is hunter2", "I like this", "I'm a bit tired"]) {
+    assert.deepEqual(lastingFacts(said), [], said);
+  }
+  assert.deepEqual(lastingFacts("Long day. I live in Tunis. My dog is called Rex!"), ["I live in Tunis", "My dog is called Rex"]);
+});
+
+test("follow-up questions are spotted, and plain requests aren't", () => {
+  for (const said of ["how old is he", "what about tomorrow", "and in Paris?", "is it open today?"]) assert.ok(looksLikeFollowUp(said), said);
+  for (const said of ["who painted the Mona Lisa", "tell me a joke", "make it louder"]) assert.ok(!looksLikeFollowUp(said), said);
+});
+
+test("what's said reaches the conversation only once, and forgetting isn't written back", async () => {
+  const memory = new Memory(":memory:");
+  const jarvis = new Jarvis({ dryRun: true }, memory);
+  await jarvis.handle("remember that my cat is Tom");
+  assert.deepEqual(memory.chatTurns(memory.currentChat!).map((turn) => turn.text), ["remember that my cat is Tom", "I'll remember that, sir."]);
+  await jarvis.handle("forget my cat");
+  assert.deepEqual(memory.allFacts(), []);
+  const words = memory.chats().flatMap((chat) => memory.chatTurns(chat.id)).map((turn) => turn.text).join(" ");
+  assert.ok(!words.includes("forget my cat"));
+});
+
+test("reopening a conversation restores what Jarvis can refer back to", async () => {
+  const memory = new Memory(":memory:");
+  const jarvis = new Jarvis({ dryRun: true }, memory);
+  await jarvis.handle("remember that my car is blue");
+  const id = memory.currentChat!;
+  jarvis.startChat();
+  assert.equal(memory.currentChat, null);
+  assert.equal(jarvis.openChat(id).length, 2);
+  jarvis.deleteChat(id);
+  assert.deepEqual(memory.chats(), []);
+});
+
+test("deleting a conversation removes exactly its lines from the command log", () => {
+  const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-scrub-"));
+  const path = joinPath(dir, "commands.jsonl");
+  writeFileSync(path, '{"said":"open firefox"}\n{"said":"my private question"}\n');
+  scrubSaid(["my private question"], path);
+  assert.equal(readFileSync(path, "utf8"), '{"said":"open firefox"}\n');
+  rmSync(dir, { recursive: true });
+});
+
+test("markdown isn't read aloud", () => {
+  assert.equal(speakable("**Very** good, `sir`."), "Very good, sir.");
+});
+
+test("replies stay short and never end on a question nothing could answer", () => {
+  assert.equal(tidyReply("Noted, sir. It seems unwise. Your back agrees. Shall I dim the lights?"), "Noted, sir. It seems unwise.");
+  assert.equal(tidyReply("Shall I?"), "Shall I?");
+  assert.equal(tidyReply("Mr.  Stark is out"), "Mr. Stark is out");
+});
+
+test("news about himself isn't taken as a command, but a request still is", () => {
+  for (const said of ["I just deleted my whole project by mistake", "I live in Tunis and I love pizza", "my back hurts"]) assert.ok(isStatementAboutSelf(said), said);
+  for (const said of ["I need the calculator", "I'm finished coding for today", "open my downloads", "what time is it"]) assert.ok(!isStatementAboutSelf(said), said);
+});
+
+test("a question about his own schedule isn't a question about the clock", () => {
+  assert.ok(!toolFitsWords("get_time", "what time do I wake up"));
+  assert.ok(toolFitsWords("get_time", "could you tell me what time it is"));
 });

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { app, BrowserWindow, ipcMain, Menu, nativeTheme, session } from "electron";
 
 import { Jarvis, pruneLog, summarize, unloadModel, type Pending, type Reply } from "./brain.ts";
-import { ClaudeManager } from "./claude.ts";
+import { ClaudeManager, type Gate } from "./claude.ts";
 import { pickOption } from "./fastpath.ts";
 import { Memory } from "./memory.ts";
 import { classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
@@ -37,7 +37,8 @@ let window: BrowserWindow | null = null;
 let voice: Voice | null = null;
 
 // Claude can't continue until the user answers, so questions wait in line here.
-type Asking = Pending & { session: string; trust?: boolean; question?: boolean };
+// `menu` means the options were read off Claude's screen, so their numbers are its real numbers.
+type Asking = Pending & { session: string; options: string[]; gate?: Gate; question?: boolean; menu?: boolean };
 const permissions: Asking[] = [];
 
 function toWindow(event: Record<string, unknown>) {
@@ -53,7 +54,14 @@ const claude = new ClaudeManager({
   },
   permission(permission) {
     const level = permission.shell ? classifyForClaude(permission.command) : "say-back";
-    enqueue({ session: permission.session, command: permission.command, level: level === "run" ? "say-back" : level });
+    enqueue({
+      session: permission.session,
+      command: permission.command,
+      level: level === "run" ? "say-back" : level,
+      options: permission.menu?.options ?? ["Yes", "No"],
+      title: permission.menu?.question ?? undefined,
+      menu: Boolean(permission.menu),
+    });
   },
   question(session, question) {
     // Several questions or multi-select need the menu itself, which is on Claude's screen.
@@ -69,7 +77,7 @@ const claude = new ClaudeManager({
     const before = permissions.length;
     const wasAsking = permissions[0]?.session === session;
     for (let at = permissions.length - 1; at >= 0; at--) {
-      if (permissions[at].session === session && !permissions[at].trust) permissions.splice(at, 1);
+      if (permissions[at].session === session && !permissions[at].gate) permissions.splice(at, 1);
     }
     if (permissions.length !== before && wasAsking) {
       toWindow({ type: "settled" });
@@ -80,8 +88,9 @@ const claude = new ClaudeManager({
     const summary = await summarize(message);
     announce(summary ? `Claude has finished, sir. ${summary}` : "Claude has finished, sir.");
   },
-  trustNeeded(project) {
-    permissions.unshift({ session: "", command: project, level: "say-back", trust: true });
+  gate(project, gate) {
+    const options = gate === "bypass" ? ["Yes, I accept", "No, keep asking me"] : ["Yes, trust this folder", "No, close it"];
+    permissions.unshift({ session: "", command: project, level: "say-back", gate, options });
     askPermission();
   },
 });
@@ -89,6 +98,8 @@ const claude = new ClaudeManager({
 function announce(say: string, pending?: Pending, spoken = say) {
   const reply: Reply = { say, source: "tool", tool: "claude", pending, ms: 0 };
   toWindow({ type: "reply", reply });
+  // Questions vanish once answered. Only lasting news belongs in the conversation.
+  if (!pending) jarvis.note(say);
   voice?.say(spoken, Boolean(pending));
 }
 
@@ -100,61 +111,106 @@ function enqueue(item: Asking) {
 function askPermission() {
   const next = permissions[0];
   if (!next) return;
-  if (next.trust) {
+  if (next.gate === "bypass") {
+    const title = "Claude shows this warning once: in bypass mode it won't ask before running anything, and you accept responsibility for what it does. Do you accept?";
+    announce("Claude wants your word on its bypass warning, sir.", { command: "", level: "say-back", options: next.options, title }, "Claude wants your word on its bypass warning, sir. It's on the screen.");
+    return;
+  }
+  if (next.gate) {
     const ask = next.command === "Computer"
       ? "Claude needs your OK to work across your home folder, sir. Do you allow it?"
       : `This is Claude's first time in ${next.command}, sir. Do you trust this folder?`;
-    announce(ask, { command: next.command, level: "say-back" });
+    announce(ask, { command: "", level: "say-back", options: next.options, title: ask });
     return;
   }
   if (next.question) {
-    const list = next.options!.map((option, index) => `${index + 1}, ${option}`).join(". ");
-    announce(`Claude asks: ${next.command}`, { command: next.command, level: "say-back", options: next.options }, `Claude asks: ${next.command} Your options are ${list}.`);
+    const list = next.options.map((option, index) => `${index + 1}, ${option}`).join(". ");
+    announce(`Claude asks: ${next.command}`, { command: "", level: "say-back", options: next.options, title: next.command }, `Claude asks: ${next.command} Your options are ${list}.`);
     return;
   }
-  const ask = next.level === "confirm"
-    ? `Claude wants to do something dangerous, sir: ${next.command}. Say confirm to allow it.`
-    : `Claude wants to run: ${next.command}. Allow it, sir?`;
-  // A long command is unbearable read aloud. The chat shows it in full either way.
-  const short = next.command.length <= 70;
-  const spoken = short ? ask : next.level === "confirm"
-    ? "Claude wants to do something dangerous, sir. It's in the chat. Say confirm to allow it."
-    : "Claude wants to run a long command, sir. It's in the chat. Allow it?";
-  announce(ask, { command: next.command, level: next.level }, spoken);
+  // A second request can be waiting behind the first, so read the menu showing now.
+  const current = next.menu ? claude.menu(next.session) : null;
+  if (current) {
+    next.options = current.options;
+    next.title = current.question ?? next.title;
+  }
+  const danger = next.level === "confirm";
+  const pending: Pending = { command: next.command, level: next.level, options: next.options, title: next.title ?? "Allow this?" };
+  const ask = danger ? "Careful, sir. Claude wants to do something dangerous." : `Claude asks: ${next.title ?? "may it do this?"}`;
+  // Long commands and every option would be unbearable read aloud. The screen has them all.
+  const tail = danger ? "Say confirm to allow it, or cancel." : "Say yes, no, or a number, sir.";
+  const shown = danger && next.command.length <= 70 ? ` ${next.command}.` : "";
+  announce(ask, pending, `${ask}${shown} ${tail}`);
 }
 
-// While Claude is waiting on a permission, the next thing said answers it.
+// Moves on to the next question once this one is settled. A null choice means cancel.
+function settleAsking(next: Asking, pick: number | null): Reply {
+  permissions.shift();
+  setTimeout(askPermission, 300);
+  const answer = (say: string): Reply => ({ say, source: "fast", tool: "claude", ms: 0 });
+  if (next.gate) {
+    const allowed = pick === 0;
+    claude.answerGate(allowed, () => announce("Claude's question didn't respond, sir. Please choose Yes in its panel."));
+    if (next.gate === "bypass") return answer(allowed ? "Understood, sir. Claude will no longer ask." : "Very good, sir. Claude will keep asking.");
+    return answer(allowed ? "Thank you, sir. Claude is starting." : "Understood, sir. I've closed it.");
+  }
+  if (pick === null) {
+    claude.answerPermission(next.session, false);
+    return answer("Cancelled, sir. Claude won't do it.");
+  }
+  if (next.question) {
+    claude.answerChoice(next.session, pick);
+    return answer(`${next.options[pick]}, sir.`);
+  }
+  if (next.menu) {
+    const pressed = claude.answerMenu(next.session, pick, next.options[pick]);
+    return answer(pressed ? `${next.options[pick]}, sir.` : "That question has already moved on, sir.");
+  }
+  // The screen couldn't be read, so only the two answers that are always safe to press.
+  claude.answerPermission(next.session, pick === 0);
+  return answer(pick === 0 ? "Allowed, sir." : "Denied, sir. Claude won't run it.");
+}
+
+// A click or a number key: a deliberate choice, so it never needs repeating.
+function chooseOption(index: number): Reply | null {
+  const next = permissions[0];
+  if (!next || !Number.isInteger(index) || !next.options[index]) return null;
+  return settleAsking(next, index);
+}
+
+// While Claude is waiting, the next thing said answers it.
 function answerPermission(said: string): Reply | null {
   const next = permissions[0];
   if (!next) return null;
-  if (next.question) {
-    if (/^(cancel|never ?mind|stop)[.!]?$/i.test(said.trim())) {
-      permissions.shift();
-      claude.answerPermission(next.session, false);
-      setTimeout(askPermission, 300);
-      return { say: "Cancelled, sir.", source: "fast", tool: "claude", ms: 0 };
+  const text = said.trim();
+  if (/^(jarvis,? )?(cancel|never ?mind|stop|deny|nope|no)(,? sir)?[.!]?$/i.test(text) && (!next.gate || next.gate === "bypass")) return settleAsking(next, null);
+  const pending: Pending = { command: next.gate || next.question ? "" : next.command, level: next.level, options: next.options, title: next.title };
+  const repeat = (say: string): Reply => ({ say, source: "fast", tool: "claude", pending, ms: 0 });
+  if (next.gate) {
+    if (isApproval(text, "say-back")) return settleAsking(next, 0);
+    return /^(no|nope|cancel)\b/i.test(text) ? settleAsking(next, 1) : repeat("Yes or no, sir?");
+  }
+  const yes = next.options.findIndex((option) => /^yes\b/i.test(option));
+  if (next.level === "confirm" && isPlainYes(text)) return repeat("This one is dangerous, sir, so I need you to say confirm, or cancel.");
+  if (next.level === "confirm" && isApproval(text, "confirm")) return settleAsking(next, Math.max(yes, 0));
+  if (!next.question) {
+    if (isApproval(text, "say-back") && next.level !== "confirm") return settleAsking(next, Math.max(yes, 0));
+    // "No, use a different name" refuses and tells Claude what to do instead.
+    if (/^(no|nope|don'?t|instead)\b/i.test(text) && text.split(/\s+/).length >= 3) {
+      const reply = settleAsking(next, null);
+      setTimeout(() => claude.ask(text), 400);
+      return { ...reply, say: "Understood, sir. I've told Claude." };
     }
-    const pick = pickOption(said, next.options!);
-    if (pick === null) return { say: "Which one, sir? You can say the number.", source: "fast", tool: "claude", pending: { command: next.command, level: next.level, options: next.options }, ms: 0 };
-    permissions.shift();
-    claude.answerChoice(next.session, pick);
-    setTimeout(askPermission, 300);
-    return { say: `${next.options![pick]}, sir.`, source: "fast", tool: "claude", ms: 0 };
+    if (/\b(always|don'?t ask|all edits|session)\b/i.test(text)) {
+      const lasting = next.options.findIndex((option) => /^yes\b.*(don'?t ask|session)/i.test(option));
+      if (lasting >= 0 && next.level !== "confirm") return settleAsking(next, lasting);
+    }
   }
-  if (next.level === "confirm" && isPlainYes(said)) {
-    return { say: "This one is dangerous, sir, so I need you to say confirm, or cancel.", source: "fast", tool: "claude", pending: { command: next.command, level: next.level }, ms: 0 };
-  }
-  permissions.shift();
-  const allowed = isApproval(said, next.level);
-  if (next.trust) {
-    claude.answerTrust(allowed, () => announce("Claude's question didn't respond, sir. Please choose Yes in its panel."));
-    setTimeout(askPermission, 300);
-    return { say: allowed ? "Thank you, sir. Claude is starting." : "Understood, sir. I've closed it.", source: "fast", tool: "claude", ms: 0 };
-  }
-  claude.answerPermission(next.session, allowed);
-  const reply: Reply = { say: allowed ? "Allowed, sir." : "Denied, sir. Claude won't run it.", source: "fast", tool: "claude", ms: 0 };
-  setTimeout(askPermission, 300);
-  return reply;
+  const pick = pickOption(text, next.options);
+  if (pick === null) return repeat("Which one, sir? You can say the number.");
+  // A dangerous request can't be approved by a stray number heard from across the room.
+  if (next.level === "confirm" && /^yes\b/i.test(next.options[pick])) return repeat("This one is dangerous, sir, so I need you to say confirm, or cancel.");
+  return settleAsking(next, pick);
 }
 
 jarvis.connectClaude({
@@ -188,8 +244,20 @@ function speakReply(reply: Reply) {
   voice?.say(reply.spoken ?? reply.say, Boolean(reply.pending || reply.listen));
 }
 
+const NEW_CHAT = /^(jarvis,? )?(please )?(let'?s )?(start |begin |open )?(a )?new (chat|conversation)( please)?[.!]?$/i;
+
 async function handleSaid(said: string): Promise<Reply> {
-  return answerPermission(said) ?? (await jarvis.handle(said));
+  if (NEW_CHAT.test(said.trim())) {
+    jarvis.startChat();
+    toWindow({ type: "chat-reset" });
+    return { say: "A clean page, sir.", source: "fast", ms: 0 };
+  }
+  const answered = answerPermission(said);
+  if (answered) {
+    jarvis.record(said, answered.say);
+    return answered;
+  }
+  return jarvis.handle(said);
 }
 
 // The voice engine comes back by itself if it crashes, but won't loop forever if it's broken.
@@ -258,10 +326,25 @@ function createWindow() {
 
 ipcMain.handle("jarvis:ask", async (_event, said: unknown) => {
   voice?.stop();
-  const reply = await handleSaid(String(said).slice(0, 2000));
+  const reply = await handleSaid(String(said).slice(0, 8000));
   speakReply(reply);
   return reply;
 });
+ipcMain.handle("jarvis:choose", (_event, index: unknown, label: unknown) => {
+  voice?.stop();
+  const reply = chooseOption(Number(index));
+  if (!reply) return { say: "That question has already moved on, sir.", source: "fast", ms: 0 } satisfies Reply;
+  jarvis.record(String(label), reply.say);
+  speakReply(reply);
+  return reply;
+});
+ipcMain.handle("chats:resume", () => jarvis.resumeRecent());
+ipcMain.handle("chats:list", () => ({ chats: memory.chats(), current: memory.currentChat }));
+ipcMain.handle("chats:open", (_event, id: unknown) => jarvis.openChat(Number(id)));
+ipcMain.handle("chats:new", () => jarvis.startChat());
+ipcMain.handle("chats:delete", (_event, id: unknown) => jarvis.deleteChat(Number(id)));
+ipcMain.handle("facts:list", () => memory.allFacts());
+ipcMain.handle("facts:delete", (_event, id: unknown) => jarvis.forgetFact(Number(id)));
 ipcMain.handle("jarvis:warm-up", () => jarvis.warmUp().then(() => true, () => false));
 ipcMain.handle("jarvis:welcome", (_event, text: unknown) => voice?.say(String(text)));
 ipcMain.handle("voice:mute", (_event, muted: unknown) => voice?.setMuted(Boolean(muted)));
@@ -288,6 +371,7 @@ ipcMain.on("claude:new-session", () => claude.newSession());
 ipcMain.on("claude:new-terminal", () => claude.newTerminal());
 ipcMain.on("claude:model", (_event, id: string, model: string) => claude.setModel(String(id), String(model)));
 ipcMain.on("claude:effort", (_event, id: string, effort: string) => claude.setEffort(String(id), String(effort)));
+ipcMain.on("claude:bypass", (_event, on: unknown) => claude.setBypass(on === true));
 ipcMain.on("claude:close-project", () => {
   const name = claude.openProject;
   closeClaude();
