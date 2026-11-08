@@ -140,14 +140,13 @@ export const isComputerFix = (said: string) => {
   const text = clean(said);
   return COMPUTER_PART.test(text) && WANTS_FIX.test(text) && !ABOUT_CODE.test(text) && (GOING_WRONG.test(text) || /\b(drivers?|nvidia|graphics|gpu|kernel|firmware|ubuntu|linux|bluetooth|wi-?fi|sound|audio|printer|webcam|battery)\b/i.test(text));
 };
+// Something is actually going wrong, as opposed to a plain job like "update my driver".
+export const describesProblem = (said: string) => GOING_WRONG.test(clean(said));
 // "My sound isn't working": a complaint about the computer, with no request yet.
 export const isComputerComplaint = (said: string) => {
   const text = clean(said);
   return COMPUTER_PART.test(text) && GOING_WRONG.test(text) && !ABOUT_CODE.test(text) && !isComputerFix(said);
 };
-// "Fix it", after a complaint.
-// "Fix it", after a complaint, also asked as a question: "is there any way I can fix it?".
-export const FIX_IT = /^(?:(?:ok|okay|alright|then|so|and|but|yes|yeah|please)[,.]?\s+)*(?:(?:is there (?:any|a) way (?:that )?(?:i|you|we) (?:can|could)|can (?:you|i|we)|could (?:you|i|we)|would you|will you|how (?:do|can|could|would|should) (?:i|you|we)|try to|go ahead and|please)\s+)?(?:fix|repair|sort(?: out)?|troubleshoot|look into|deal with|solve|resolve)\s+(?:it|that|this|them|the (?:problem|issue))(?:\s+(?:out|for me|please|then|now))*\s*\??$/i;
 
 export const looksLikeCoding = (said: string, projectOpen = false) => DOES.test(clean(said)) && (projectOpen || CODE_THING.test(said));
 

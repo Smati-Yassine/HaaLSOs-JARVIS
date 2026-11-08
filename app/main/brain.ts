@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { abilityCall } from "./abilities.ts";
-import { claudeAction, clean, fastPath, FIX_IT, isComputerComplaint, isComputerFix, linkCall, looksLikeCoding, splitCommands, tellClaude, type Call } from "./fastpath.ts";
+import { claudeAction, clean, describesProblem, fastPath, isComputerComplaint, isComputerFix, linkCall, looksLikeCoding, splitCommands, tellClaude, type Call } from "./fastpath.ts";
 import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
@@ -357,8 +357,6 @@ export class Jarvis {
   private lastDepth: Depth = "small";
   // Lines said since Jarvis last passed something to Claude: the only ones Claude hasn't seen.
   private unseen = 0;
-  // He just said something on the computer is wrong, so "fix it" means that.
-  private complaint = false;
 
   constructor(ctx: Context = { dryRun: false }, memory: Memory | null = null) {
     this.ctx = memory ? { ...ctx, reminders: ctx.reminders ?? memory } : ctx;
@@ -614,11 +612,11 @@ Rewritten:`);
 
   // A job on the computer itself: one checked command if that's enough, otherwise Claude, in the
   // home folder or, with a project open, in that session, told it's about the computer.
-  private async computerJob(said: string, begin: number): Promise<Reply> {
+  private async computerJob(said: string, begin: number, direct = false): Promise<Reply> {
     const secret = this.keepsSecret(said, begin);
     if (secret) return secret;
     const task = this.withContext(said);
-    const small = await this.planSmallJob(task, "fast", begin);
+    const small = direct ? null : await this.planSmallJob(task, "fast", begin);
     if (small) return small;
     const claude = this.ctx.claude!;
     log({ said, tool: "claude_task", source: "fast", dryRun: this.ctx.dryRun });
@@ -783,10 +781,11 @@ Rewritten:`);
     // "Tell Claude to ..." while a project is open is a task for it, unless it's "tell Claude to stop".
     if (this.ctx.claude?.openProject && tellClaude(said) && !claudeAction(said)) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
     // Something wrong with the computer goes to whoever can actually fix it, never to small talk.
-    const fixAfterComplaint = this.complaint && FIX_IT.test(clean(said));
-    this.complaint = false;
-    if (this.ctx.claude && !narration && (isComputerFix(said) || fixAfterComplaint)) return this.computerJob(said, begin);
-    if (this.ctx.claude && !narration && isComputerComplaint(said)) this.complaint = true;
+    // A problem ("my wifi doesn't work") opens Claude Code with his words straight away, the way
+    // typing it into Claude Code would. A plain job ("update my graphics driver") tries one
+    // checked command first.
+    if (this.ctx.claude && !narration && (isComputerComplaint(said) || (isComputerFix(said) && describesProblem(said)))) return this.computerJob(said, begin, true);
+    if (this.ctx.claude && !narration && isComputerFix(said)) return this.computerJob(said, begin);
 
     const projects = this.projectNames();
     const mentioned = projectInSentence(clean(said), projects);
@@ -895,7 +894,7 @@ Rewritten:`);
       // repeats old actions: "yes" once re-ran a search. Actions then need their words present.
       // With nothing open, "ask claude about Rome" is a question. "Ask claude to fix it" is still a task.
       const namedClaude = !this.ctx.claude?.openProject && /^ask claude\s+(about|if|whether|what|why|how|who|when|where|which|is|are|should|can)\b/i.test(clean(said));
-      const mayAct = !(isStatementAboutSelf(said) || namedClaude || plain || this.complaint);
+      const mayAct = !(isStatementAboutSelf(said) || namedClaude || plain);
       if (rewritten) return { say: "", source: "model", ms: Date.now() - begin };
       // Claude works out what casual or misheard words meant, far better than the small model,
       // which once opened Firefox for "get me into the luminelle stuff". The small model stays as
@@ -914,9 +913,7 @@ Rewritten:`);
       if (call && toolFitsWords(call.tool, asked)) return this.runTool(call, "model", said, begin, asked);
       const words = namedClaude ? clean(said).replace(/^ask claude\s+(?:about\s+|if\s+|whether\s+)?/i, "") : clean(said);
       const context = this.context(said, notes);
-      // A complaint about the computer deserves real advice, and the words to have it fixed.
-      let depth = namedClaude || this.complaint ? "serious" : depthOf(clean(said));
-      if (this.complaint) context.push(`Something on his computer is going wrong. Give him the likely cause and one or two things to check, and end by telling him he can say "fix it" to have Claude look into it on his computer.`);
+      let depth = namedClaude ? "serious" : depthOf(clean(said));
       if (this.lastDepth !== "small" && looksLikeFollowUp(said)) depth = this.lastDepth;
       this.lastDepth = depth;
       // Questions go to Claude: the small local model invents facts. Small talk stays here, as he
@@ -925,7 +922,7 @@ Rewritten:`);
         const speech = this.ctx.speech?.();
         // When the answer is spoken as it comes, its first sentence is quicker than this would be.
         if (depth === "serious" && !speech) this.ctx.ack?.("One moment, sir.");
-        const tier = namedClaude || this.complaint || needsDeep(said) ? "deep" : "quick";
+        const tier = namedClaude || needsDeep(said) ? "deep" : "quick";
         const best = await this.ctx.thinker(this.forClaude(words, context), speech?.push, tier);
         speech?.end();
         if (best) {

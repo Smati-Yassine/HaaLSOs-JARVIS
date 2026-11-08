@@ -10,10 +10,10 @@ import headless from "@xterm/headless";
 
 import { askClaudeOnce, depthOf, needsDeep } from "./thinker.ts";
 import { parseUnderstanding, understandPrompt, UNDERSTAND } from "./understand.ts";
-import { approvalTitle, judge, packagesExist, parsePlan, withPkexec } from "./computer.ts";
+import { approvalTitle, judge, packagesExist, parsePlan, PLANNER, withPkexec } from "./computer.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
-import { claudeAction, fastPath, FIX_IT, isComputerComplaint, isComputerFix, linkCall, tellClaude, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
+import { claudeAction, describesProblem, fastPath, isComputerComplaint, isComputerFix, linkCall, tellClaude, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { describeActivity, describeStep, screenText, plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
@@ -869,14 +869,14 @@ test("saying claude after talking something through hands Claude that conversati
   const sent: string[] = [];
   const started: string[] = [];
   const claude = { openProject: null as string | null, start(project: string) { started.push(project); claude.openProject = project; }, ask: (task: string) => { sent.push(task); return true; }, close() {} };
-  const thinker = async () => "The Discord app can't capture system audio on Linux, sir.";
+  const thinker = async (_prompt: string, _on?: unknown, _tier?: string, system?: string) => (system === UNDERSTAND ? "NONE" : "The Rust book is the place to start, sir.");
   const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"], thinker });
-  await jarvis.handle("why does my screen share in discord have no system sound?");
+  await jarvis.handle("what's the best way to learn rust?");
   const reply = await jarvis.handle("claude");
   assert.equal(reply.tool, "claude_task");
   assert.match(reply.say, /told it what we were talking about/);
   assert.deepEqual(started, ["Computer"]);
-  assert.match(sent[0], /^He said "claude" to bring you in[\s\S]*fix it, asking before you change anything[\s\S]*He said: why does my screen share in discord have no system sound\?\nJarvis said: /);
+  assert.match(sent[0], /^He said "claude" to bring you in[\s\S]*fix it, asking before you change anything[\s\S]*He said: what's the best way to learn rust\?\nJarvis said: The Rust book/);
   // Claude has heard it all now, so saying it again only shows Claude.
   assert.match((await jarvis.handle("claude")).say, /Here's Claude/);
   assert.equal(sent.length, 1);
@@ -1528,35 +1528,32 @@ test("a problem with the computer reaches Claude, and code problems stay code", 
   for (const said of ["fix the login screen", "the settings page doesn't work", "fix the bug in the bluetooth module", "my app crashes on startup", "I love my laptop", "what's the weather"]) {
     assert.ok(!isComputerFix(said) && !isComputerComplaint(said), said);
   }
-  for (const said of ["fix it", "ok fix it", "please fix that", "go ahead and fix it", "sort it out", "is there any way i can fix it ?", "is there a way you could fix it", "can you fix it?", "how do I solve this", "so how can we fix the problem"]) assert.ok(FIX_IT.test(said), said);
-  for (const said of ["fix the footer", "can you fix the login page", "is there any way to make pasta"]) assert.ok(!FIX_IT.test(said), said);
+  assert.ok(describesProblem("my wifi dont work") && !describesProblem("update my graphics driver"));
 });
 
-test("a complaint gets advice, then 'fix it' sends Claude with the complaint, in the home folder or the open session", async () => {
+test("a problem with the computer opens Claude Code with his words straight away, and a plain job tries one command first", async () => {
   for (const open of [null, "luminelle"]) {
     const sent: string[] = [];
     const started: string[] = [];
     const prompts: string[] = [];
     const claude = { openProject: open as string | null, start: (project: string) => { started.push(project); }, close() {}, ask: (task: string) => { sent.push(task); return true; } };
-    // The planner hands the job to Claude. The understanding step finds no command in a lone "fix it".
-    const thinker = async (prompt: string, _on?: unknown, tier?: string, system?: string) => { prompts.push(`${tier}|${prompt}`); return system === UNDERSTAND ? "NONE" : system ? "CLAUDE" : "Probably the PipeWire output, sir. Check the output device. Say fix it to have Claude look into it."; };
+    const thinker = async (prompt: string, _on?: unknown, _tier?: string, system?: string) => { prompts.push(system === PLANNER ? "planner" : "other"); return system === UNDERSTAND ? "NONE" : "CLAUDE"; };
     const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"], thinker });
-    const advice = await jarvis.handle("my sound isn't working");
-    assert.equal(advice.tool, "claude_answer");
-    assert.match(prompts[0], /^deep\|[\s\S]*say "fix it"/);
-    const fixing = await jarvis.handle("fix it");
-    assert.equal(fixing.tool, "claude_task");
-    assert.match(sent[0], /^fix it\n\n\(For context[\s\S]*He said: my sound isn't working/);
+    for (const said of ["hi\nmy wifi dont work", "why when i screen share in discord it has no system sound ?", "my laptop is really slow, fix it"]) {
+      const reply = await jarvis.handle(said);
+      assert.equal(reply.tool, "claude_task", said);
+      assert.match(reply.say, /have Claude look into it/);
+      // A greeting in front ("hi") is dropped. The rest goes over as he said it.
+      assert.ok(sent.at(-1)!.startsWith(said.replace(/^hi\n/, "")), said);
+    }
     if (open) assert.match(sent[0], /about his computer itself, not the luminelle project/);
-    assert.deepEqual(started, open ? [] : ["Computer"]);
-    // Asked as a question, after a complaint, it's the same job.
-    await jarvis.handle("why when i screen share in discord it has no system sound ?");
-    assert.equal((await jarvis.handle("is there any way i can fix it ?")).tool, "claude_task");
-    // "Fix it" without a complaint before it isn't a computer job.
-    assert.notEqual((await jarvis.handle("fix it")).tool, "claude_task");
+    assert.deepEqual(prompts, [], "a problem never waits on the one-command planner");
+    assert.deepEqual(started, open ? [] : ["Computer", "Computer", "Computer"]);
+    // A plain job with nothing going wrong asks the planner first. Here it hands over to Claude.
+    assert.equal((await jarvis.handle("update my graphics driver")).tool, "claude_task");
+    assert.deepEqual(prompts, ["planner"]);
   }
 });
-
 test("casual words are rewritten by Claude into a command, which then goes the normal way", async () => {
   assert.equal(parseUnderstanding("start coding HaaLSO's JARVIS"), "start coding HaaLSO's JARVIS");
   assert.equal(parseUnderstanding('"take a screenshot."'), "take a screenshot");
