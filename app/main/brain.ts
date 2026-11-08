@@ -242,6 +242,16 @@ export const isMessageForClaude = (said: string) => {
   return !/^(what|what's|whats|who|who's|when|where|why|how|which|is|are|was|were|do|does|did|can|could|should|would|will|tell me|search|google|look up|find out|remind|remember|forget|open|close|play|set|turn)\b/i.test(text);
 };
 
+// A question that can only want an answer: it starts like a question and mentions nothing live,
+// nothing on the computer and nothing to do. These skip choosing an action, which saves about a
+// second, and go straight to whoever answers. Anything doubtful still goes through the model.
+const QUESTION_START = /^(who|what|what's|whats|why|how|when|where|which|explain|define|is|are|was|were|does|did|do|can|could|should|would|tell me (about|why|how|what))\b/i;
+const NOT_PLAIN = /\b(today|tonight|tomorrow|yesterday|now|right now|currently|current|latest|recent|recently|this (morning|week|month|year|weekend)|next (week|month)|20\d\d|news|headlines|score|price|cost|weather|forecast|temperature|time|date|day is|open|close|launch|play|pause|volume|mute|battery|wi-?fi|internet|connected|disk|storage|cpu|ram|memory|running|installed|file|files|folder|download|downloads|clipboard|window|screen|remind|reminder|timer|alarm|remember|forget|note|project|code|coding|claude|search|google|look up|website|app|my (computer|laptop|pc|desktop|system))\b/i;
+export const isPlainQuestion = (said: string) => {
+  const text = clean(said);
+  return QUESTION_START.test(text) && !NOT_PLAIN.test(text) && !said.includes("\n") && depthOf(text) !== "small";
+};
+
 const FOLLOW_UP_START =/^(and|so|but|what about|how about|why|when|where|who|how|what|which|is|are|was|were|does|did|can)\b/i;
 const POINTS_AT_BEFORE = /^(and|what about|how about)\b|\b(he|she|they|him|her|them|it|that|there|those|his|their|its)\b/i;
 
@@ -716,13 +726,15 @@ Rewritten:`);
     if (quick && /^(open|launch)\b/i.test(clean(said))) return this.runTool(quick, "fast", said, begin);
 
     try {
-      const asked = await this.standalone(said);
+      // A plain question goes to Claude with the whole conversation, so it needs no rewriting either.
+      const plain = Boolean(this.ctx.thinker) && isPlainQuestion(said) && !containsSecret(said);
+      const asked = plain ? said : await this.standalone(said);
       const notes = this.memory?.relevant(asked) ?? [];
       // Choosing an action looks only at this request. With earlier chat in view, the small model
       // repeats old actions: "yes" once re-ran a search. Actions then need their words present.
       // With nothing open, "ask claude about Rome" is a question. "Ask claude to fix it" is still a task.
       const namedClaude = !this.ctx.claude?.openProject && /^ask claude\s+(about|if|whether|what|why|how|who|when|where|which|is|are|should|can)\b/i.test(clean(said));
-      const { call } = isStatementAboutSelf(said) || namedClaude ? { call: null } : await askModel([{ role: "user", content: asked }], notes);
+      const { call } = isStatementAboutSelf(said) || namedClaude || plain ? { call: null } : await askModel([{ role: "user", content: asked }], notes);
       if (call && toolFitsWords(call.tool, asked)) return this.runTool(call, "model", said, begin, asked);
       const words = namedClaude ? clean(said).replace(/^ask claude\s+(?:about\s+|if\s+|whether\s+)?/i, "") : clean(said);
       const context = this.context(said, notes);

@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { askClaudeOnce, depthOf } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
-import { summarize, isHesitation, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
+import { summarize, isHesitation, isPlainQuestion, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
@@ -1100,6 +1100,11 @@ test("facts and puzzles go to Claude too, and who built him never leaves the com
 test("Claude's finished report is told by Claude, with the small model only as a fallback", async () => {
   const report = "I added a dark mode toggle to the settings page, stored the choice in local storage, and updated the tests. All 40 tests pass.";
   assert.equal(await summarize(report, async () => "It added a dark mode switch to the settings page, sir, and every test passes."), "It added a dark mode switch to the settings page, sir, and every test passes.");
+});
+
+test("plain questions skip choosing an action, anything live or about the computer doesn't", () => {
+  for (const said of ["who painted the Mona Lisa?", "why is the sky blue", "how old was he when he died?", "what does ephemeral mean", "explain how vaccines work", "if I have 3 apples and eat one how many do I have?".replace(/^if/, "what if")]) assert.ok(isPlainQuestion(said), said);
+  for (const said of ["what's the weather", "who won the match today", "what time is it", "how much battery do I have", "where is my downloads folder", "what's on my screen", "who is the current prime minister", "how are you", "thanks", "what's the price of bitcoin", "can you open firefox", "what did I ask you to remember"]) assert.equal(isPlainQuestion(said), false, said);
 });
 
 test("if Claude can't answer, Jarvis still does", async () => {
