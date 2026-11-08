@@ -138,6 +138,33 @@ export function splitCommands(said: string): string[] | null {
   return parts.every((part) => fastPath(part) !== null) ? parts : null;
 }
 
+// Asking about Claude's work and the project's terminals. Returns null if it isn't that.
+export function linkCall(said: string): Call | null {
+  const text = clean(said);
+  const lower = text.toLowerCase();
+  let match: RegExpMatchArray | null;
+  if ((match = text.match(/^(?:in the terminal,?\s+(?:run|type)\s+(.+)|(?:run|execute|type)\s+(.+?)\s+in\s+(?:the|a|my)\s+terminal)$/i))) {
+    return { tool: "terminal_run", args: { command: (match[1] ?? match[2]).trim() } };
+  }
+  if (/^(what('?s| is) claude (doing|up to|working on|busy with)|what is claude doing|how('?s| is) claude (getting on|coming along|doing with)|is claude (done|finished|still (working|going|at it)|busy|working)( yet)?|how far (along )?is claude|where('?s| is) claude (at|up to)|(what'?s )?claude'?s (status|progress)|status of claude)\b/.test(lower)) {
+    return { tool: "claude_status", args: {} };
+  }
+  if (/^(how|what|am i|do i|check|show|tell me)\b/.test(lower) && (/\bclaude\b.*\b(usage|limits?|left|remaining|quota|allowance)\b|\b(usage|limits?|quota)\b.*\bclaude\b|\bhow much (claude|of my (claude|plan|limits?))\b/.test(lower))) {
+    return { tool: "claude_usage", args: {} };
+  }
+  if (/^(what did claude (change|do|edit|modify|touch|write)|what changes did claude make|what('?s| has| have)? (been )?changed( in the (project|code))?|show me (the |what )?changes?|summari[sz]e (the )?changes|what'?s new in the (code|project))$/.test(lower)) {
+    return { tool: "claude_changes", args: {} };
+  }
+  const aboutTerminal = /\b(terminal|console)\b/.test(lower) && /^(what|why|did|does|do|is|are|was|were|read|check|look|tell me|show|explain|any|can you see)\b/.test(lower);
+  if (aboutTerminal || /^(did|have|has) (the |my )?(tests?|build|install|command|script)\b.*\b(pass|passed|fail|failed|work|worked|finish|finished|succeed|succeeded|break|broke)\b/.test(lower)) {
+    return { tool: "terminal_read", args: { question: text } };
+  }
+  return null;
+}
+
+// "Tell Claude to add a footer": the rest is the task. Null if it doesn't start that way.
+export const tellClaude = (said: string) => clean(said).match(/^(?:(?:ok|okay|alright|right|so|great|good|cool|perfect|yes|yeah|then|now|and)[,.]?\s+)*(?:tell|ask|have|get|let)\s+claude\s+(?:to\s+)?(.+)$/i)?.[1] ?? null;
+
 // Claude's controls, by voice. Returns the action, or null if this isn't about them.
 export type ClaudeAction =
   | { act: "effort"; level: string } | { act: "model"; name: string } | { act: "session" } | { act: "terminal" }

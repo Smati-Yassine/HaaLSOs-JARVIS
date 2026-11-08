@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { abilityCall } from "./abilities.ts";
-import { claudeAction, clean, fastPath, looksLikeCoding, splitCommands, type Call } from "./fastpath.ts";
+import { claudeAction, clean, fastPath, linkCall, looksLikeCoding, splitCommands, tellClaude, type Call } from "./fastpath.ts";
 import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
@@ -74,7 +74,7 @@ export function tidyReply(text: string): string {
 }
 
 type Message = { role: string; content: string };
-export type Pending = { command: string; level: Level; options?: string[]; title?: string };
+export type Pending = { command: string; level: Level; options?: string[]; title?: string; terminal?: boolean };
 export type Reply = {
   say: string;
   source: "fast" | "model" | "tool";
@@ -263,6 +263,10 @@ export const isPlainTalk = (said: string) => isSmallTalk(clean(said)) && !NOT_PL
 const FOLLOW_UP_START =/^(and|so|but|what about|how about|why|when|where|who|how|what|which|is|are|was|were|does|did|can)\b/i;
 const POINTS_AT_BEFORE = /^(and|what about|how about)\b|\b(he|she|they|him|her|them|it|that|there|those|his|their|its)\b/i;
 
+// "Have Claude do that" means nothing to Claude, which never heard what "that" was.
+const POINTS_BACK_TASK = /\b(that|this|it|those|these|them|the same|what you (said|suggested|mentioned|described)|your (idea|suggestion|plan|advice)|you (said|suggested|mentioned)|we (talked|discussed|said)|the (idea|suggestion|plan|one))\b/i;
+const CONTEXT_LINES = 6;
+
 // "How old is he?" means nothing to a search engine without the question before it.
 export const looksLikeFollowUp = (said: string) => {
   const text = clean(said);
@@ -344,6 +348,8 @@ export class Jarvis {
   private deepReady = false;
   // A follow-up to something Claude answered should go back to Claude.
   private lastDepth: Depth = "small";
+  // Lines said since Jarvis last passed something to Claude: the only ones Claude hasn't seen.
+  private unseen = 0;
 
   constructor(ctx: Context = { dryRun: false }, memory: Memory | null = null) {
     this.ctx = memory ? { ...ctx, reminders: ctx.reminders ?? memory } : ctx;
@@ -373,6 +379,7 @@ export class Jarvis {
 
   private load(turns: Turn[]) {
     this.history = turns.slice(-KEEP_TURNS).map((turn) => ({ role: turn.role === "user" ? "user" : "assistant", content: turn.text }));
+    this.unseen = this.history.length;
     this.pending = null;
     this.awaitingProject = false;
     this.waitingTask = null;
@@ -404,6 +411,7 @@ export class Jarvis {
 
   // Something said outside a normal request, like Claude finishing, still belongs to the talk.
   note(say: string) {
+    this.unseen += 1;
     this.history.push({ role: "assistant", content: say });
     this.history = this.history.slice(-KEEP_TURNS);
     this.memory?.addTurn("jarvis", say);
@@ -473,7 +481,22 @@ Rewritten:`);
     }
   }
 
+  // His exact words, and when they point back at the conversation, the last few lines of it, so
+  // Claude knows what "that" is. Only then: a task that stands alone costs no extra tokens.
+  private withContext(task: string): string {
+    // A long or pasted message says what it means by itself.
+    const short = !task.includes("\n") && task.split(/\s+/).length <= 25;
+    const fresh = Math.min(this.unseen, CONTEXT_LINES, this.history.length);
+    if (!short || !fresh || !POINTS_BACK_TASK.test(task)) return task;
+    const lines = this.history.slice(-fresh).map((line) => {
+      const text = line.content.length > LINE_LIMIT ? `${line.content.slice(0, LINE_LIMIT)}...` : line.content;
+      return `${line.role === "user" ? "He said" : "Jarvis said"}: ${text}`;
+    });
+    return `${task}\n\n(For context, what was just said between him and Jarvis, his voice assistant:\n${lines.join("\n")})`;
+  }
+
   private remember(said: string, reply: string) {
+    this.unseen += 2;
     this.history.push({ role: "user", content: said }, { role: "assistant", content: reply });
     this.history = this.history.slice(-KEEP_TURNS);
   }
@@ -487,9 +510,9 @@ Rewritten:`);
     if (call.tool === "run_command" && this.ctx.claude) return this.handToClaude(said, source, begin);
     // Claude gets the user's exact words, never the small model's rewrite of them.
     if (call.tool === "ask_claude") {
-      call = { ...call, args: { task: said } };
+      call = { ...call, args: { task: this.withContext(tellClaude(said) ?? said) } };
       if (this.ctx.claude && !this.ctx.claude.openProject) {
-        this.waitingTask = said;
+        this.waitingTask = call.args.task;
         this.awaitingProject = true;
         const projects = this.projectNames();
         const reply = this.finish(said, `Which project is that for, sir? You have ${projects.join(", ")}.`, source, begin, "ask_claude");
@@ -506,7 +529,9 @@ Rewritten:`);
       if (result.needsApproval) {
         this.pending = result.needsApproval;
         const { command, level, title } = result.needsApproval;
-        const ask = title ? `${title.replace(/\?$/, ", sir?")} Say confirm to go ahead.` : level === "confirm"
+        const asked = title ? title.replace(/\?$/, ", sir?") : "";
+        // A plain yes is enough unless it's dangerous.
+        const ask = title ? (level === "confirm" ? `${asked} Say confirm to go ahead.` : asked) : level === "confirm"
           ? `This one is dangerous, sir: ${command}. Say confirm to run it.`
           : `I'll run: ${command}. Shall I go ahead, sir?`;
         return { say: ask, source, tool: call.tool, pending: result.needsApproval, ms: Date.now() - begin };
@@ -523,7 +548,7 @@ Rewritten:`);
     log({ said, tool: "claude_task", source, dryRun: this.ctx.dryRun });
     if (!this.ctx.dryRun) {
       if (!claude.openProject) claude.start("Computer", homedir());
-      claude.ask(said);
+      claude.ask(this.withContext(said));
     }
     return this.finish(said, "Right away, sir. I'll have Claude handle that.", source, begin, "claude_task");
   }
@@ -570,6 +595,7 @@ Rewritten:`);
 
   private finish(said: string, say: string, source: Reply["source"], begin: number, tool?: string): Reply {
     this.remember(said, say);
+    if (tool === "ask_claude" || tool === "claude_task") this.unseen = 0; // Claude has it all now.
     return { say, source, tool, ms: Date.now() - begin };
   }
 
@@ -594,7 +620,7 @@ Rewritten:`);
       return { say: "Cancelled, sir.", source: "fast", ms: Date.now() - begin };
     }
     if (this.pending) {
-      const { command, level } = this.pending;
+      const { command, level, terminal: pendingTerminal } = this.pending;
       if (level === "confirm" && isPlainYes(said)) {
         return { say: "This one is dangerous, sir, so I need you to say confirm, or cancel.", source: "fast", pending: this.pending, ms: Date.now() - begin };
       }
@@ -604,6 +630,10 @@ Rewritten:`);
         return { say: "Cancelled, sir. I didn't run it.", source: "fast", ms: Date.now() - begin };
       }
       log({ said, command, level, approved: true, dryRun: this.ctx.dryRun });
+      if (pendingTerminal) {
+        const where = this.ctx.dryRun ? "the terminal" : this.ctx.claude?.runInTerminal?.(command);
+        return { say: where ? `Running it in ${where}, sir.` : "I couldn't reach a terminal, sir.", source: "tool", tool: "terminal_run", ms: Date.now() - begin };
+      }
       const result: { say: string; spoken?: string } = this.ctx.dryRun ? { say: "Done, sir." } : await runApproved(command);
       return { say: result.say, spoken: result.spoken, source: "tool", tool: "run_command", ms: Date.now() - begin };
     }
@@ -646,6 +676,11 @@ Rewritten:`);
     const narration = isPastNarration(said);
     const ability = narration ? null : abilityCall(clean(said));
     if (ability) return this.runTool(ability, "fast", said, begin);
+    // Claude's work and the terminals: exact phrases, so they never wait on the model.
+    const link = this.ctx.claude && !narration ? linkCall(said) : null;
+    if (link) return this.runTool(link, "fast", said, begin);
+    // "Tell Claude to ..." while a project is open is a task for it, unless it's "tell Claude to stop".
+    if (this.ctx.claude?.openProject && tellClaude(said) && !claudeAction(said)) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
 
     const projects = this.projectNames();
     const mentioned = projectInSentence(clean(said), projects);

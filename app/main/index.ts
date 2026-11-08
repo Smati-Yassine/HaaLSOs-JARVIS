@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeTheme, session } from "electron";
 
 import { Jarvis, pruneLog, summarize, unloadModel, type Pending, type Reply } from "./brain.ts";
-import { ClaudeManager, type Gate } from "./claude.ts";
+import { ClaudeManager, describeActivity, type Gate } from "./claude.ts";
 import { pickOption } from "./fastpath.ts";
 import { Memory } from "./memory.ts";
 import { classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
@@ -49,6 +49,14 @@ let tags = 0;
 const nextTag = () => ++tags;
 // The request being answered right now, so an answer that's spoken as it streams in gets its number.
 let answering = 0;
+
+// The last thing Claude finished, as Jarvis said it, so "what's Claude doing" can repeat it.
+let lastSummary: string | null = null;
+// When Jarvis last spoke up about a long task, so he gives an update now and then, not constantly.
+const PROGRESS_FIRST = 3 * 60_000;
+const PROGRESS_EVERY = 5 * 60_000;
+let progressTask: number | null = null;
+let progressSaid = 0;
 
 // Claude can't continue until the user answers, so questions wait in line here.
 // `menu` means the options were read off Claude's screen, so their numbers are its real numbers.
@@ -100,6 +108,7 @@ const claude = new ClaudeManager({
   },
   async finished(_id, message) {
     const summary = await summarize(message);
+    lastSummary = summary || null;
     announce(summary ? `Claude has finished, sir. ${summary}` : "Claude has finished, sir.");
   },
   gateCleared: (gate) => dropGate(gate),
@@ -261,10 +270,38 @@ jarvis.connectClaude({
   archive: () => claude.archiveActive(),
   setVisible: (visible) => toWindow({ type: visible ? "show-claude" : "hide-claude" }),
   interrupt: () => claude.interrupt(),
+  status: () => describeActivity(claude.activity(), lastSummary),
+  lastReport: () => claude.activity().report,
+  terminal: () => claude.terminal(),
+  runInTerminal: (command) => claude.runInTerminal(command),
+  usage: () => claude.plan,
+  changes: () => claude.changes(),
 });
+
+// A long task gets a short spoken update now and then, so silence doesn't feel like a hang.
+// Only aloud, never while a question waits, and never in the conversation itself.
+function progressUpdate() {
+  const now = claude.activity();
+  if (!now.working || !voiceReady || permissions.length) {
+    if (!now.working) progressTask = null;
+    return;
+  }
+  const started = now.started;
+  if (!started) return; // Picked up mid-task, so there's no telling how long it's been.
+  if (progressTask !== started) {
+    progressTask = started;
+    progressSaid = 0;
+  }
+  const due = progressSaid ? progressSaid + PROGRESS_EVERY : started + PROGRESS_FIRST;
+  if (Date.now() < due) return;
+  progressSaid = Date.now();
+  const step = now.steps.at(-1);
+  voice?.say(step ? `Claude is still at it, sir. It just ${step}.` : "Claude is still working on it, sir.");
+}
 
 function closeClaude() {
   permissions.length = 0;
+  lastSummary = null;
   claude.closeProject();
 }
 
@@ -452,6 +489,7 @@ app.whenReady().then(() => {
   createWindow();
   // Waits for the window, so anything missed while closed appears after the welcome.
   setTimeout(() => setInterval(sayDueReminders, 2000).unref(), 8000).unref();
+  setInterval(progressUpdate, 30_000).unref();
 });
 
 // Stop the microphone, end Claude's terminals, and free the graphics card when Jarvis closes.

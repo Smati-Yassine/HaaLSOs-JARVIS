@@ -1,11 +1,13 @@
 // Runs the real Claude Code in real terminals, and hears what it does through its official
 // hooks and status line. Jarvis never reads your login. The only prompts it answers by itself are
 // a folder you already said yes to, and resuming a session you just clicked.
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { promisify } from "node:util";
 
 import headless from "@xterm/headless";
 import { spawn, type IPty } from "node-pty";
@@ -174,7 +176,77 @@ export type Gate = "trust" | "bypass";
 export type Permission = { session: string; command: string; shell: boolean; menu: Menu | null };
 export type Question = { question: string; options: string[]; simple: boolean };
 
-type Session = SessionView & { pty: IPty | null; buffer: string; sent: number; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number; resumeHandled: boolean };
+type Session = SessionView & { pty: IPty | null; buffer: string; sent: number; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number; resumeHandled: boolean; task: string | null; taskStarted: number; steps: string[]; finished: number; lastReport: string | null };
+
+// What Claude is up to, for Jarvis to tell him about.
+export type Activity = { project: string | null; working: boolean; task: string | null; started: number; minutes: number; steps: string[]; report: string | null; finishedMinutesAgo: number | null };
+export type Plan = Snapshot["plan"];
+const MAX_STEPS = 30;
+const TERMINAL_SCROLLBACK = 300;
+const MAX_DIFF = 12_000;
+const git = promisify(execFile);
+
+// Claude describes its commands as instructions, "Run the tests", which read back as "ran the tests".
+const PAST: Record<string, string> = {
+  run: "ran", install: "installed", check: "checked", list: "listed", build: "built", start: "started", create: "created",
+  show: "showed", test: "tested", find: "found", search: "searched", read: "read", remove: "removed", delete: "deleted",
+  update: "updated", add: "added", make: "made", view: "viewed", compile: "compiled", format: "formatted", lint: "linted",
+  commit: "committed", push: "pushed", pull: "pulled", stage: "staged", fetch: "fetched", count: "counted", print: "printed",
+  verify: "verified", copy: "copied", move: "moved", rename: "renamed", restart: "restarted", stop: "stopped", kill: "stopped",
+  get: "got", open: "opened", clean: "cleaned", type: "type-checked", typecheck: "type-checked", inspect: "inspected", look: "looked",
+};
+export function pastTense(instruction: string): string {
+  const [first, ...rest] = instruction.trim().split(/\s+/);
+  const past = PAST[first.toLowerCase()];
+  return past ? [past, ...rest].join(" ") : `ran a command to ${instruction.charAt(0).toLowerCase()}${instruction.slice(1)}`;
+}
+
+// One of Claude's steps, in words a voice can say.
+export function describeStep(tool: string, input: Record<string, any>): string | null {
+  const file = typeof (input.file_path ?? input.notebook_path) === "string" ? basename(String(input.file_path ?? input.notebook_path)) : "";
+  switch (tool) {
+    case "Edit": case "MultiEdit": case "NotebookEdit": return file ? `edited ${file}` : "edited a file";
+    case "Write": return file ? `wrote ${file}` : "wrote a file";
+    case "Read": return file ? `read ${file}` : "read a file";
+    case "Bash": {
+      if (typeof input.description === "string" && input.description.trim()) return pastTense(input.description.replace(/[.!]+$/, "").slice(0, 80));
+      const command = String(input.command ?? "").split("\n")[0].slice(0, 60);
+      return command ? `ran ${command}` : "ran a command";
+    }
+    case "Grep": case "Glob": return "searched the code";
+    case "WebSearch": case "WebFetch": return "looked something up online";
+    case "Task": case "Agent": return "sent a helper off on part of it";
+    case "TodoWrite": return null; // Its own to-do list says nothing new.
+    default: return tool.startsWith("mcp__") ? null : `used ${tool}`;
+  }
+}
+
+// What Jarvis says when asked what Claude is doing.
+export function describeActivity(activity: Activity, summary: string | null = null): string {
+  if (!activity.project) return "No project is open, sir, so Claude isn't working on anything.";
+  const recent = activity.steps.slice(-3);
+  const lately = recent.length ? ` Most recently it ${recent.length > 1 ? `${recent.slice(0, -1).join(", ")} and ${recent.at(-1)}` : recent[0]}.` : "";
+  if (activity.working) {
+    const time = activity.minutes < 1 ? "It's only just started" : `It's been at it ${activity.minutes} minute${activity.minutes === 1 ? "" : "s"}`;
+    const task = activity.task ? ` on: ${activity.task.length > 90 ? `${activity.task.slice(0, 90)}...` : activity.task}` : "";
+    return `Claude is working${task}, sir. ${time}.${lately}`;
+  }
+  if (activity.finishedMinutesAgo !== null && (summary || activity.report)) {
+    const when = activity.finishedMinutesAgo < 1 ? "just now" : `${activity.finishedMinutesAgo} minute${activity.finishedMinutesAgo === 1 ? "" : "s"} ago`;
+    const told = summary ?? activity.report!.split(/(?<=[.!?])\s/)[0];
+    return `Claude is idle, sir. It finished ${when}. ${told}`;
+  }
+  return `Claude is idle in ${activity.project}, sir, waiting for a task.`;
+}
+
+// The last lines of a terminal screen as text, without the empty rows below the prompt.
+export function screenText(screen: Screen, lines = 80): string {
+  const buffer = screen.buffer.active;
+  const rows: string[] = [];
+  for (let row = Math.max(0, buffer.length - lines); row < buffer.length; row++) rows.push((buffer.getLine(row)?.translateToString(true) ?? "").trimEnd());
+  while (rows.length && !rows.at(-1)!.trim()) rows.pop();
+  return rows.join("\n");
+}
 type Stored = { id: string; title: string; archived: boolean; updated: number };
 
 type Listeners = {
@@ -252,7 +324,7 @@ export class ClaudeManager {
   private project: string | null = null;
   private path: string | null = null;
   private active: string | null = null;
-  private plan: Snapshot["plan"] = { fiveHour: null, fiveHourResets: null, week: null, weekResets: null };
+  private plan_: Snapshot["plan"] = { fiveHour: null, fiveHourResets: null, week: null, weekResets: null };
   private server: Server | null = null;
   private shellCount = 0;
   // A restarted session has to come back at the size of the window, or its screen garbles.
@@ -342,7 +414,7 @@ export class ClaudeManager {
   private onStatus(data: Record<string, any>) {
     const limits = data.rate_limits;
     if (limits) {
-      this.plan = {
+      this.plan_ = {
         fiveHour: limits.five_hour?.used_percentage ?? null,
         fiveHourResets: limits.five_hour?.resets_at ?? null,
         week: limits.seven_day?.used_percentage ?? null,
@@ -375,6 +447,11 @@ export class ClaudeManager {
       case "UserPromptSubmit":
         if (session) {
           session.working = true;
+          if (typeof data.prompt === "string") {
+            session.task = plainPrompt(data.prompt).replace(/\s*\(For context, what was just said[\s\S]*$/, "").slice(0, 200) || session.task;
+            session.taskStarted = Date.now();
+            session.steps = [];
+          }
           if (session.title === "New session" && typeof data.prompt === "string") {
             const words = plainPrompt(data.prompt);
             if (words) session.title = words.length > 34 ? `${words.slice(0, 34)}...` : words;
@@ -386,6 +463,8 @@ export class ClaudeManager {
         if (session) {
           session.working = false;
           session.askSeq += 1;
+          session.finished = Date.now();
+          session.lastReport = String(data.last_assistant_message ?? "") || session.lastReport;
           this.on.settled(session.id);
           this.on.finished(session.id, String(data.last_assistant_message ?? ""));
         }
@@ -426,6 +505,8 @@ export class ClaudeManager {
         if (session) {
           session.working = true; // It carried on, even if Esc only closed a menu.
           session.askSeq += 1;
+          const step = describeStep(String(data.tool_name ?? ""), data.tool_input ?? {});
+          if (step && step !== session.steps.at(-1)) session.steps = [...session.steps, step].slice(-MAX_STEPS);
         }
         this.on.settled(data.session_id);
         return;
@@ -579,6 +660,7 @@ export class ClaudeManager {
       session.working = false;
       if (session.gate) this.gateAnswered(session, false);
       if (session.kind === "shell") {
+        session.screen?.dispose();
         this.sessions.delete(session.id);
         if (this.active === session.id) this.active = [...this.sessions.values()].find((other) => other.pty)?.id ?? null;
       } else if (session.state === "running") session.state = "paused";
@@ -628,7 +710,9 @@ export class ClaudeManager {
     return {
       id, kind, title, state: "running", working: false, needsTrust: false, model: null, effort: null, context: null,
       tokens: null, minutes: 0, elsewhere: false, pty: null, buffer: "", sent: 0, queued: [], started: Date.now(), ready: kind === "shell", trustAsked: false, bypassAsked: false, gate: null, leftoverInput: false,
-      screen: kind === "claude" ? new headless.Terminal({ cols: this.cols, rows: this.rows, scrollback: 0, allowProposedApi: true }) : null, askSeq: 0, resumeHandled: false,
+      // Plain terminals keep some history, so Jarvis can read what a command printed.
+      screen: new headless.Terminal({ cols: this.cols, rows: this.rows, scrollback: kind === "claude" ? 0 : TERMINAL_SCROLLBACK, allowProposedApi: true }), askSeq: 0, resumeHandled: false,
+      task: null, taskStarted: 0, steps: [], finished: 0, lastReport: null,
     };
   }
 
@@ -882,6 +966,67 @@ export class ClaudeManager {
     return title;
   }
 
+  // ---- What Jarvis can tell him about ---------------------------------------
+
+  // The session worth talking about: the busy one, else the one he's looking at, else the last to finish.
+  activity(): Activity {
+    const claudes = [...this.sessions.values()].filter((session) => session.kind === "claude");
+    const session = claudes.find((item) => item.working)
+      ?? (this.active ? claudes.find((item) => item.id === this.active && (item.task || item.finished)) : undefined)
+      ?? [...claudes].sort((a, b) => b.finished - a.finished).find((item) => item.finished);
+    const now = Date.now();
+    return {
+      project: this.project,
+      working: Boolean(session?.working),
+      task: session?.task ?? null,
+      started: session?.working ? session.taskStarted : 0,
+      minutes: session?.working && session.taskStarted ? Math.floor((now - session.taskStarted) / 60000) : 0,
+      steps: session?.steps ?? [],
+      report: session?.lastReport ?? null,
+      finishedMinutesAgo: session?.finished && !session.working ? Math.floor((now - session.finished) / 60000) : null,
+    };
+  }
+
+  get plan(): Plan {
+    return this.plan_;
+  }
+
+  private shell(): Session | null {
+    const shells = [...this.sessions.values()].filter((session) => session.kind === "shell" && session.pty);
+    return shells.find((session) => session.id === this.active) ?? shells.at(-1) ?? null;
+  }
+
+  // The end of the plain terminal he's using, or null if there isn't one.
+  terminal(lines = 80): { title: string; text: string } | null {
+    const session = this.shell();
+    return session?.screen ? { title: session.title, text: screenText(session.screen, lines) } : null;
+  }
+
+  // Types a command into a plain terminal, opening one if needed. Returns the terminal's name.
+  runInTerminal(command: string): string | null {
+    if (!this.project) return null;
+    const session = this.shell() ?? this.sessions.get(this.newTerminal())!;
+    this.active = session.id;
+    session.pty?.write(`${command}\r`);
+    this.changed();
+    return session.title;
+  }
+
+  // What changed in the project since its last commit, or null if it isn't a git repository.
+  async changes(): Promise<{ status: string; diff: string } | null> {
+    if (!this.path) return null;
+    const run = (...args: string[]) => git("git", ["-C", this.path!, ...args], { timeout: 10_000, maxBuffer: 8_000_000 }).then((out) => out.stdout);
+    try {
+      await run("rev-parse", "--is-inside-work-tree");
+    } catch {
+      return null;
+    }
+    const status = await run("status", "--short").catch(() => "");
+    // A new repository has no commit to compare with yet.
+    const diff = await run("diff", "HEAD").catch(() => run("diff").catch(() => ""));
+    return { status: status.trim(), diff: diff.length > MAX_DIFF ? `${diff.slice(0, MAX_DIFF)}\n...(cut short)` : diff };
+  }
+
   // ---- Remembering sessions between runs -----------------------------------
 
   private readStore(): Record<string, Stored[]> {
@@ -910,7 +1055,7 @@ export class ClaudeManager {
       id: session.id, kind: session.kind, title: session.title, state: session.state, working: session.working, needsTrust: session.needsTrust,
       model: session.model, effort: session.effort, context: session.context, tokens: session.tokens, minutes: session.minutes, elsewhere: session.elsewhere,
     }));
-    return { project: this.project, path: this.path, sessions, active: this.active, plan: this.plan, models: MODELS, efforts: EFFORTS, bypass: this.bypass };
+    return { project: this.project, path: this.path, sessions, active: this.active, plan: this.plan_, models: MODELS, efforts: EFFORTS, bypass: this.bypass };
   }
 
   private changed() {

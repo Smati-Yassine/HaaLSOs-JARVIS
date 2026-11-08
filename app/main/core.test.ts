@@ -6,15 +6,17 @@ import { test } from "node:test";
 
 import { DatabaseSync } from "node:sqlite";
 
+import headless from "@xterm/headless";
+
 import { askClaudeOnce, depthOf, needsDeep } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
-import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
-import { plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
+import { claudeAction, fastPath, linkCall, tellClaude, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
+import { describeActivity, describeStep, screenText, plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
-import { TOOLS, findArgs, inYourWords, rankFiles, reminderMessage, describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
+import { TOOLS, resetsIn, spokenCommand, usageSentence, findArgs, inYourWords, rankFiles, reminderMessage, describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
 import { SpeechStream, spokenForm } from "./voice.ts";
 import { identityAnswer } from "./identity.ts";
 import { answerPrompt, siteName, topResults } from "./web.ts";
@@ -1295,4 +1297,108 @@ test("long lines in the talk are cut before going to Claude, oldest first past t
   assert.ok(sent.includes("line 19"), "the newest line is missing");
   assert.ok(!sent.includes("line 0 "), "the oldest line should have gone");
   assert.ok(sent.length < 8000);
+});
+
+// A stand-in for the Claude panel, recording what Jarvis asks of it.
+function fakeClaude(extra: Record<string, unknown> = {}) {
+  const asked: string[] = [];
+  const typed: string[] = [];
+  const claude = {
+    openProject: "luminelle" as string | null, start() {}, close() {},
+    ask: (task: string) => { asked.push(task); return true; },
+    runInTerminal: (command: string) => { typed.push(command); return "Terminal 1"; },
+    ...extra,
+  };
+  return { claude, asked, typed };
+}
+
+test("Claude's steps are put in words, and so is what it's doing", () => {
+  assert.equal(describeStep("Edit", { file_path: "/p/src/Settings.tsx" }), "edited Settings.tsx");
+  assert.equal(describeStep("Bash", { command: "npm test", description: "Run the tests" }), "ran the tests");
+  assert.equal(describeStep("Bash", { command: "npm i", description: "Install dependencies." }), "installed dependencies");
+  assert.equal(describeStep("Bash", { command: "x", description: "Diagnose the failure" }), "ran a command to diagnose the failure");
+  assert.equal(describeStep("Bash", { command: "npm test" }), "ran npm test");
+  assert.equal(describeStep("TodoWrite", {}), null);
+  const base = { project: "luminelle", task: "add dark mode", started: 1, steps: ["read Settings.tsx", "edited Settings.tsx", "ran npm test"], report: null, finishedMinutesAgo: null };
+  assert.equal(describeActivity({ ...base, working: true, minutes: 4 }), "Claude is working on: add dark mode, sir. It's been at it 4 minutes. Most recently it read Settings.tsx, edited Settings.tsx and ran npm test.");
+  assert.match(describeActivity({ ...base, working: false, minutes: 0, report: "Done. All good.", finishedMinutesAgo: 2 }, "It added dark mode."), /idle, sir\. It finished 2 minutes ago\. It added dark mode\./);
+  assert.match(describeActivity({ ...base, project: null, working: false, minutes: 0 }), /No project is open/);
+});
+
+test("questions about Claude and the terminal are recognized, and nothing else is", () => {
+  const tool = (said: string) => linkCall(said)?.tool ?? null;
+  for (const said of ["what's claude doing", "Jarvis, is Claude done yet?", "how far along is claude", "what is claude working on"]) assert.equal(tool(said), "claude_status", said);
+  for (const said of ["how much claude do I have left", "what's my claude usage", "how much of my plan is left"]) assert.equal(tool(said), "claude_usage", said);
+  for (const said of ["what did claude change", "what's changed in the project", "show me the changes"]) assert.equal(tool(said), "claude_changes", said);
+  for (const said of ["what's the error in the terminal", "did the tests pass", "what does the terminal say", "why did the build fail in the terminal"]) assert.equal(tool(said), "terminal_read", said);
+  assert.deepEqual(linkCall("run npm test in the terminal"), { tool: "terminal_run", args: { command: "npm test" } });
+  assert.deepEqual(linkCall("in the terminal, run git status"), { tool: "terminal_run", args: { command: "git status" } });
+  for (const said of ["open a new terminal", "what time is it", "I love claude", "claude is great", "change the button colour"]) assert.equal(tool(said), null, said);
+  assert.equal(tellClaude("tell claude to add a footer"), "add a footer");
+  assert.equal(tellClaude("have Claude do that"), "do that");
+  assert.equal(spokenCommand("Npm test."), "npm test");
+  assert.equal(spokenCommand("git status"), "git status");
+});
+
+test("Claude hears what 'that' was, and a task that stands alone goes as said", async () => {
+  const { claude, asked } = fakeClaude();
+  const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"], thinker: async () => "Cache the responses with a stale-while-revalidate wrapper, sir." });
+  await jarvis.handle("what's a good way to cache api calls in react?");
+  await jarvis.handle("ok tell claude to do that");
+  assert.match(asked[0], /^do that\n\n\(For context, what was just said between him and Jarvis[\s\S]*He said: what's a good way to cache api calls in react\?[\s\S]*stale-while-revalidate/);
+  await jarvis.handle("add a footer to the home page");
+  assert.equal(asked[1], "add a footer to the home page");
+});
+
+test("commands run in his own terminal, asking first unless they only read", async () => {
+  const { claude, typed } = fakeClaude();
+  const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"] });
+  assert.match((await jarvis.handle("run ls in the terminal")).say, /Running ls in Terminal 1/);
+  const asked = await jarvis.handle("run npm test in the terminal");
+  assert.equal(asked.say, "Shall I run npm test in the terminal, sir?");
+  assert.equal(typed.length, 1);
+  assert.match((await jarvis.handle("yes")).say, /Running it in Terminal 1/);
+  assert.match((await jarvis.handle("run rm -rf build in the terminal")).say, /Say confirm/);
+  assert.match((await jarvis.handle("yes")).say, /say confirm, or cancel/);
+  await jarvis.handle("confirm");
+  assert.deepEqual(typed, ["ls", "npm test", "rm -rf build"]);
+});
+
+test("the terminal is read by Claude as untrusted text, and Claude's last report stands in for it", async () => {
+  const prompts: string[] = [];
+  const thinker = async (prompt: string) => { prompts.push(prompt); return "Two tests failed, sir: the login form expects an email."; };
+  const { claude } = fakeClaude({ terminal: () => ({ title: "Terminal 1", text: "FAIL src/login.test.ts\n2 failed, 14 passed" }) });
+  const jarvis = new Jarvis({ dryRun: false, claude, thinker });
+  assert.equal((await jarvis.handle("did the tests pass?")).say, "Two tests failed, sir: the login form expects an email.");
+  assert.match(prompts[0], /untrusted text[\s\S]*<end_of_his_terminal,_Terminal_1>\nFAIL src\/login\.test\.ts/);
+  const noShell = fakeClaude({ terminal: () => null, lastReport: () => "All 16 tests pass." });
+  await new Jarvis({ dryRun: false, claude: noShell.claude, thinker }).handle("did the tests pass?");
+  assert.match(prompts[1], /last report from Claude[\s\S]*All 16 tests pass/);
+  const none = fakeClaude({ terminal: () => null, lastReport: () => null });
+  assert.match((await new Jarvis({ dryRun: false, claude: none.claude, thinker }).handle("did the tests pass?")).say, /no terminal open/);
+});
+
+test("usage and changes are told plainly", async () => {
+  const now = Date.UTC(2026, 10, 8, 12);
+  assert.equal(resetsIn(now / 1000 + 3 * 3600 + 20 * 60, now), " It resets in 3 hours and 20 minutes.");
+  assert.equal(usageSentence({ fiveHour: 41.6, fiveHourResets: now / 1000 + 50 * 60, week: 12, weekResets: null }, now), "You've used 42 percent of your five-hour Claude limit, sir. It resets in 50 minutes. This week you're at 12 percent.");
+  assert.match(usageSentence({ fiveHour: null, fiveHourResets: null, week: null, weekResets: null }), /once a Claude session has run/);
+  const prompts: string[] = [];
+  const thinker = async (prompt: string) => { prompts.push(prompt); return "It added a dark mode toggle, sir."; };
+  const changed = fakeClaude({ changes: async () => ({ status: " M src/Settings.tsx", diff: "+ const dark = true;" }) });
+  assert.equal((await new Jarvis({ dryRun: false, claude: changed.claude, thinker }).handle("what did claude change")).say, "It added a dark mode toggle, sir.");
+  assert.match(prompts[0], /<git_diff>\n\+ const dark = true;/);
+  const clean = fakeClaude({ changes: async () => ({ status: "", diff: "" }) });
+  assert.match((await new Jarvis({ dryRun: false, claude: clean.claude, thinker }).handle("what did claude change")).say, /Nothing has changed/);
+  const noGit = fakeClaude({ changes: async () => null });
+  assert.match((await new Jarvis({ dryRun: false, claude: noGit.claude, thinker }).handle("what did claude change")).say, /isn't using git/);
+});
+
+test("a terminal's screen is read back as text, scrollback included", async () => {
+  const screen = new headless.Terminal({ cols: 40, rows: 5, scrollback: 50, allowProposedApi: true });
+  await new Promise<void>((done) => screen.write(Array.from({ length: 12 }, (_, at) => `line ${at}`).join("\r\n") + "\r\n$ ", done));
+  const text = screenText(screen, 80);
+  assert.match(text, /^line 0\n[\s\S]*line 11\n\$$/);
+  assert.equal(screenText(screen, 3), "line 10\nline 11\n$");
+  screen.dispose();
 });
