@@ -42,7 +42,8 @@ export function fastPath(said: string): Call | null {
     return { tool: "get_time", args: { want: "date" } };
   }
 
-  if ((match = lower.match(/^how (?:big|large) is (?:my |the )?(downloads|documents|desktop|pictures|music|videos|home)(?: folder)?$/))) {
+  if ((match = lower.match(/^how (?:big|large) is (?:my |the )?(downloads|documents|desktop|pictures|music|videos|home)(?: folder)?$/))
+    || (match = lower.match(/^how much (?:space|room|storage|disk space) (?:do|does|is) (?:my |the )?(downloads|documents|desktop|pictures|music|videos|home)(?: folder)? (?:take|taking|use|using|take up|taking up)(?: up)?$/))) {
     return { tool: "folder_info", args: { folder: match[1], want: "size" } };
   }
   if ((match = lower.match(/^(?:what'?s|what is|show(?: me)?|list)(?: what'?s)?(?: in| inside)?(?: my| the)?\s+(downloads|documents|desktop|pictures|music|videos|home)(?: folder)?$/))) {

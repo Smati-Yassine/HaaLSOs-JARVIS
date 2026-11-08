@@ -49,6 +49,9 @@ export function findProject(spoken: string, names: string[]): string | null {
 const COMMON_WORDS = new Set([
   "project", "projects", "coding", "code", "work", "working", "start", "open", "begin", "with", "this", "that",
   "please", "claude", "folder", "lets", "time", "today", "file", "files", "page", "website", "site",
+  // Words about the computer itself, which once matched a project: "port 8888" opened "portfolio".
+  "port", "ports", "server", "process", "space", "disk", "drive", "music", "video", "videos", "photo", "photos",
+  "picture", "pictures", "downloads", "documents", "desktop", "network", "terminal", "window", "screen", "using",
 ]);
 
 // Finds a project named anywhere in a sentence, tolerating speech mistakes.

@@ -55,7 +55,10 @@ export type Context = {
   reminders?: Pick<Memory, "addReminder" | "reminders" | "clearReminders">;
   // Sends a question to Claude. Only the real app has this, so tests never spend plan usage.
   // "deep" asks for the stronger, costlier model; everything else uses the quick one.
-  thinker?: (prompt: string, onText?: (delta: string) => void, tier?: "quick" | "deep") => Promise<string | null>;
+  // A different system prompt replaces Jarvis's voice, for jobs that aren't conversation.
+  thinker?: (prompt: string, onText?: (delta: string) => void, tier?: "quick" | "deep", system?: string) => Promise<string | null>;
+  // Tells him something later, aloud and in the chat, like a job in the background finishing.
+  notify?: (text: string) => void;
   // Starts speaking an answer while it's still being written.
   speech?: () => { push: (delta: string) => void; end: () => void; spoke: boolean } | null;
   clipboard?: { read(): string | Promise<string>; write(text: string): void };
@@ -413,11 +416,11 @@ export function projectSummary(name: string, root = PROJECTS_ROOT): string {
 
 // ---- Terminal ---------------------------------------------------------------
 
-export async function runApproved(command: string): Promise<Result> {
+export async function runApproved(command: string, timeout = 120_000): Promise<Result> {
   try {
     const { stdout, stderr } = await run("bash", ["-c", command], {
       cwd: homedir(), // "my Downloads folder" should mean ~/Downloads wherever Jarvis was started.
-      timeout: 120_000,
+      timeout,
       maxBuffer: 4_000_000,
     });
     const output = (stdout || stderr).trim();

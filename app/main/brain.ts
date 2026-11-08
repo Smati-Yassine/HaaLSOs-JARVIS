@@ -8,6 +8,7 @@ import { claudeAction, clean, fastPath, linkCall, looksLikeCoding, splitCommands
 import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
+import { approvalTitle, doneMessage, judge, packagesExist, parsePlan, PLANNER, systemFacts, withPkexec } from "./computer.ts";
 import { IDENTITY, identityAnswer } from "./identity.ts";
 import { askClaudeOnce, depthOf, isSmallTalk, needsDeep, type Depth } from "./thinker.ts";
 import { OLLAMA, ollamaChat, SMALL_MODEL as MODEL } from "./ollama.ts";
@@ -74,7 +75,10 @@ export function tidyReply(text: string): string {
 }
 
 type Message = { role: string; content: string };
-export type Pending = { command: string; level: Level; options?: string[]; title?: string; terminal?: boolean };
+// "background" runs it without making him wait, and says when it's done: installs can take minutes.
+export type Pending = { command: string; level: Level; options?: string[]; title?: string; terminal?: boolean; background?: boolean };
+// Long enough for a big install.
+const BACKGROUND_LIMIT = 15 * 60_000;
 export type Reply = {
   say: string;
   source: "fast" | "model" | "tool";
@@ -252,7 +256,7 @@ export const isMessageForClaude = (said: string) => {
 // nothing on the computer and nothing to do. These skip choosing an action, which saves about a
 // second, and go straight to whoever answers. Anything doubtful still goes through the model.
 const QUESTION_START = /^(who|what|what's|whats|why|how|when|where|which|explain|define|is|are|was|were|does|did|do|can|could|should|would|tell me (about|why|how|what))\b/i;
-const NOT_PLAIN = /\b(today|tonight|tomorrow|yesterday|now|right now|currently|current|latest|recent|recently|this (morning|week|month|year|weekend)|next (week|month)|20\d\d|news|headlines|score|scores|last night|last week|last weekend|this season|win|won|lose|lost|beat|price|cost|rate|exchange|stocks?|weather|forecast|temperature|cold|hot|warm|rain|raining|snow|snowing|sunny|umbrella|day of the week|time|date|day is|open|close|launch|play|pause|volume|mute|battery|wi-?fi|internet|connected|disk|storage|cpu|ram|memory|running|installed|file|files|folder|download|downloads|clipboard|window|screen|remind|reminder|timer|alarm|remember|forget|note|project|code|coding|claude|search|google|look up|website|app|my (computer|laptop|pc|desktop|system))\b/i;
+const NOT_PLAIN = /\b(today|tonight|tomorrow|yesterday|now|right now|currently|current|latest|recent|recently|this (morning|week|month|year|weekend)|next (week|month)|20\d\d|news|headlines|score|scores|last night|last week|last weekend|this season|win|won|lose|lost|beat|price|cost|rate|exchange|stocks?|weather|forecast|temperature|cold|hot|warm|rain|raining|snow|snowing|sunny|umbrella|day of the week|time|date|day is|open|close|launch|play|pause|volume|mute|battery|wi-?fi|internet|connected|disk|storage|cpu|ram|memory|running|installed|file|files|folder|download|downloads|clipboard|window|screen|remind|reminder|timer|alarm|remember|forget|note|project|code|coding|claude|search|google|look up|website|app|space|port|process|my (computer|laptop|pc|desktop|system|videos|music|pictures|photos|documents|downloads|home folder|disk|drive|files|apps|programs|network|screen))\b/i;
 export const isPlainQuestion = (said: string) => {
   const text = clean(said);
   return QUESTION_START.test(text) && !NOT_PLAIN.test(text) && !said.includes("\n") && depthOf(text) !== "small";
@@ -498,6 +502,18 @@ Rewritten:`);
     return `${task}\n\n(For context, what was just said between him and Jarvis, his voice assistant:\n${lines.join("\n")})`;
   }
 
+  // Runs an approved small job without holding up the conversation, and says how it went.
+  private pendingBackground(command: string, background?: boolean): boolean {
+    if (!background) return false;
+    const plan = judge(command);
+    const running = this.ctx.dryRun ? Promise.resolve({ ok: true, say: "Done, sir." }) : runApproved(command, BACKGROUND_LIMIT);
+    void running.then((result) => {
+      log({ command, finished: result.ok });
+      this.ctx.notify?.(doneMessage(plan, result));
+    });
+    return true;
+  }
+
   private remember(said: string, reply: string) {
     this.unseen += 2;
     this.history.push({ role: "user", content: said }, { role: "assistant", content: reply });
@@ -510,7 +526,7 @@ Rewritten:`);
     if (call.tool === "run_command" && this.ctx.claude?.openProject) call = { tool: "ask_claude", args: {} };
     // With nothing open, computer tasks still go to Claude, which can really do them and asks
     // through Jarvis. The small model's guessed shell commands are too unreliable to run.
-    if (call.tool === "run_command" && this.ctx.claude) return this.handToClaude(said, source, begin);
+    if (call.tool === "run_command" && this.ctx.claude) return await this.handToClaude(said, source, begin);
     // Claude gets the user's exact words, never the small model's rewrite of them.
     if (call.tool === "ask_claude") {
       call = { ...call, args: { task: this.withContext(tellClaude(said) ?? said) } };
@@ -529,16 +545,7 @@ Rewritten:`);
     log({ said, tool: call.tool, args: call.args, source, dryRun: this.ctx.dryRun });
     try {
       const result = await tool.run(call.args, this.ctx);
-      if (result.needsApproval) {
-        this.pending = result.needsApproval;
-        const { command, level, title } = result.needsApproval;
-        const asked = title ? title.replace(/\?$/, ", sir?") : "";
-        // A plain yes is enough unless it's dangerous.
-        const ask = title ? (level === "confirm" ? `${asked} Say confirm to go ahead.` : asked) : level === "confirm"
-          ? `This one is dangerous, sir: ${command}. Say confirm to run it.`
-          : `I'll run: ${command}. Shall I go ahead, sir?`;
-        return { say: ask, source, tool: call.tool, pending: result.needsApproval, ms: Date.now() - begin };
-      }
+      if (result.needsApproval) return this.askFirst(result.needsApproval, source, call.tool, begin);
       return { ...this.finish(said, result.say, source, begin, call.tool), spoken: result.spoken };
     } catch (error) {
       log({ said, tool: call.tool, error: String(error) });
@@ -546,7 +553,38 @@ Rewritten:`);
     }
   }
 
-  private handToClaude(said: string, source: Reply["source"], begin: number): Reply {
+  // Waits for his answer before anything runs.
+  private askFirst(pending: Pending, source: Reply["source"], tool: string | undefined, begin: number): Reply {
+    this.pending = pending;
+    const { command, level, title } = pending;
+    const asked = title ? title.replace(/\?$/, ", sir?") : "";
+    // A plain yes is enough unless it's dangerous.
+    const ask = title ? (level === "confirm" ? `${asked} Say confirm to go ahead.` : asked) : level === "confirm"
+      ? `This one is dangerous, sir: ${command}. Say confirm to run it.`
+      : `I'll run: ${command}. Shall I go ahead, sir?`;
+    // A long command read aloud is just symbols. The screen shows it.
+    const spoken = !title && (command.length > 40 || /[|&;<>$`\\]/.test(command))
+      ? level === "confirm" ? "This one is dangerous, sir. The command is on the screen. Say confirm to run it." : "I'll run a command for that, sir. It's on the screen. Shall I go ahead?"
+      : undefined;
+    return { say: ask, spoken, source, tool, pending, ms: Date.now() - begin };
+  }
+
+  // A small job gets one command, checked and approved. Null means it needs a whole Claude session.
+  private async planSmallJob(said: string, source: Reply["source"], begin: number): Promise<Reply | null> {
+    if (!this.ctx.thinker || this.ctx.claude?.openProject) return null;
+    const reply = await this.ctx.thinker(`About his computer: ${systemFacts()}\n\nHis request: ${said}`, undefined, "quick", PLANNER).catch(() => null);
+    const planned = parsePlan(reply);
+    if (!planned) return null;
+    const command = withPkexec(planned);
+    const plan = judge(command);
+    if (!(await packagesExist(plan))) return null;
+    log({ said, tool: "small_job", command, level: plan.level, source, dryRun: this.ctx.dryRun });
+    return this.askFirst({ command, level: plan.level, title: approvalTitle(plan), background: true }, source, "small_job", begin);
+  }
+
+  private async handToClaude(said: string, source: Reply["source"], begin: number): Promise<Reply> {
+    const small = await this.planSmallJob(said, source, begin);
+    if (small) return small;
     const claude = this.ctx.claude!;
     log({ said, tool: "claude_task", source, dryRun: this.ctx.dryRun });
     if (!this.ctx.dryRun) {
@@ -623,7 +661,7 @@ Rewritten:`);
       return { say: "Cancelled, sir.", source: "fast", ms: Date.now() - begin };
     }
     if (this.pending) {
-      const { command, level, terminal: pendingTerminal } = this.pending;
+      const { command, level, terminal: pendingTerminal, background: pendingBackground } = this.pending;
       if (level === "confirm" && isPlainYes(said)) {
         return { say: "This one is dangerous, sir, so I need you to say confirm, or cancel.", source: "fast", pending: this.pending, ms: Date.now() - begin };
       }
@@ -633,6 +671,7 @@ Rewritten:`);
         return { say: "Cancelled, sir. I didn't run it.", source: "fast", ms: Date.now() - begin };
       }
       log({ said, command, level, approved: true, dryRun: this.ctx.dryRun });
+      if (this.pendingBackground(command, pendingBackground)) return { say: "On it, sir. I'll tell you when it's done.", source: "tool", tool: "small_job", ms: Date.now() - begin };
       if (pendingTerminal) {
         const where = this.ctx.dryRun ? "the terminal" : this.ctx.claude?.runInTerminal?.(command);
         return { say: where ? `Running it in ${where}, sir.` : "I couldn't reach a terminal, sir.", source: "tool", tool: "terminal_run", ms: Date.now() - begin };
@@ -820,7 +859,7 @@ Rewritten:`);
       // The small model gave up on a request, so the one that can do it gets it. Only a plain
       // "I can't" at the start counts: a dry remark may well contain the word.
       if (this.ctx.claude && isRefusal(answer) && !/\?\s*$/.test(said)) {
-        return this.handToClaude(said, "model", begin);
+        return await this.handToClaude(said, "model", begin);
       }
       return this.finish(said, speakable(answer) || "I didn't catch that, sir.", "model", begin);
     } catch (error) {

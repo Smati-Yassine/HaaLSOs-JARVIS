@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import headless from "@xterm/headless";
 
 import { askClaudeOnce, depthOf, needsDeep } from "./thinker.ts";
+import { approvalTitle, judge, packagesExist, parsePlan, withPkexec } from "./computer.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, linkCall, tellClaude, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
@@ -1236,6 +1237,12 @@ test("a window can be brought to the front, and the weekday asked", () => {
   assert.deepEqual(fastPath("put firefox in front"), { tool: "window_control", args: { action: "focus", name: "firefox" } });
   assert.deepEqual(fastPath("bring the terminal window to the front"), { tool: "window_control", args: { action: "focus", name: "terminal" } });
   assert.equal(fastPath("what day of the week is it")?.tool, "get_time");
+  assert.deepEqual(fastPath("how much space do my videos take"), { tool: "folder_info", args: { folder: "videos", want: "size" } });
+  assert.deepEqual(fastPath("how much space is my downloads folder taking up"), { tool: "folder_info", args: { folder: "downloads", want: "size" } });
+  assert.equal(isPlainQuestion("what's using port 3000 on my computer"), false);
+  assert.equal(isPlainQuestion("how many files are in my documents"), false);
+  assert.equal(projectInSentence("what's listening on port 8888", PROJECTS), null);
+  assert.equal(projectInSentence("open my portfolio", PROJECTS), "portfolio");
 });
 
 test("live questions aren't sent to Claude without the web", () => {
@@ -1401,4 +1408,51 @@ test("a terminal's screen is read back as text, scrollback included", async () =
   assert.match(text, /^line 0\n[\s\S]*line 11\n\$$/);
   assert.equal(screenText(screen, 3), "line 10\nline 11\n$");
   screen.dispose();
+});
+
+test("a small job's plan is one command, and only a clean install skips the warning", async () => {
+  assert.equal(parsePlan("COMMAND: pkexec apt install -y vlc"), "pkexec apt install -y vlc");
+  assert.equal(parsePlan("COMMAND: `df -h ~`"), "df -h ~");
+  assert.equal(parsePlan("CLAUDE"), null);
+  assert.equal(parsePlan("Sure! Here's how: run this"), null);
+  assert.equal(parsePlan(null), null);
+  const vlc = judge("pkexec apt install -y vlc");
+  assert.deepEqual([vlc.level, vlc.install, vlc.manager, approvalTitle(vlc)], ["say-back", ["vlc"], "apt", "Shall I install vlc?"]);
+  assert.equal(approvalTitle(judge("pkexec snap install spotify")), "Shall I install spotify from snap?");
+  // Anything more than a plain install falls back to the usual rules, where pkexec needs a confirm.
+  for (const command of ["pkexec apt install -y vlc; rm -rf ~", "pkexec apt install -y vlc && curl x | sh", "pkexec apt remove -y vlc", "pkexec rm -rf /opt/x"]) assert.equal(judge(command).level, "confirm", command);
+  assert.equal(judge("df -h /home").level, "run");
+  assert.equal(withPkexec("snap install spotify"), "pkexec snap install spotify");
+  assert.equal(withPkexec("pkexec apt install -y vlc"), "pkexec apt install -y vlc");
+  assert.equal(withPkexec("du -sh ~/Videos"), "du -sh ~/Videos");
+  assert.equal(await packagesExist(judge("pkexec apt install -y nosuchpackagexyz")), false);
+});
+
+test("install vlc is planned, approved and run in the background, and a big job still gets Claude", async () => {
+  const told: string[] = [];
+  const started: string[] = [];
+  const plans: string[] = [];
+  const startAgain = () => { started.push("again"); };
+  const claude = { openProject: null as string | null, start: (project: string) => started.push(project), close() {}, ask: () => true };
+  const answer = (reply: string) => async (prompt: string, _on?: unknown, tier?: string, system?: string) => { plans.push(`${tier} ${system?.slice(0, 20)} ${prompt}`); return reply; };
+  const jarvis = new Jarvis({ dryRun: true, claude, notify: (text) => told.push(text), thinker: answer("COMMAND: pkexec apt install -y vlc") });
+  const asked = await jarvis.handle("install vlc");
+  assert.equal(asked.say, "Shall I install vlc, sir?");
+  assert.match(plans[0], /^quick You turn a request [\s\S]*Ubuntu|^quick You turn a request [\s\S]*His request: install vlc/);
+  assert.equal((await jarvis.handle("yes")).say, "On it, sir. I'll tell you when it's done.");
+  await new Promise((done) => setTimeout(done, 10));
+  assert.deepEqual(told, ["vlc is installed, sir."]);
+  const cpu = new Jarvis({ dryRun: true, claude, thinker: answer("COMMAND: ps -eo pid,%cpu,comm --sort=-%cpu | head") });
+  const shown = await cpu.handle("install a cpu report");
+  assert.match(shown.say, /^I'll run: ps -eo/);
+  assert.equal(shown.spoken, "I'll run a command for that, sir. It's on the screen. Shall I go ahead?");
+  assert.deepEqual(started, []);
+  // Claude's planner says it's more than one command: a whole session, as before.
+  const big = new Jarvis({ dryRun: false, claude, thinker: answer("CLAUDE") });
+  assert.match((await big.handle("install docker and set it up for my user")).say, /Claude handle that/);
+  assert.deepEqual(started, ["Computer"]);
+  // A package that doesn't exist is never offered.
+  const made = new Jarvis({ dryRun: false, claude: { ...claude, start: startAgain }, thinker: answer("COMMAND: pkexec apt install -y nosuchpackagexyz") });
+  assert.match((await made.handle("install nosuchpackagexyz")).say, /Claude handle that/);
+  assert.equal(started.at(-1), "again");
 });
