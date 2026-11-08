@@ -1131,15 +1131,15 @@ test("a serious question goes to Claude with what it needs, and comes back label
   assert.match(prompts[0], /I live in Tunis/);
 });
 
-test("a question with a secret never leaves the computer, and small talk goes to Claude", async () => {
+test("a question with a secret never leaves the computer, and neither does small talk", async () => {
   let asked = 0;
   const thinker = async () => { asked += 1; return "from claude"; };
   const jarvis = new Jarvis({ dryRun: true, thinker });
   assert.notEqual((await jarvis.handle("why does my password keep failing")).tool, "claude_answer");
   assert.equal(asked, 0);
-  assert.equal((await jarvis.handle("thanks")).tool, "claude_answer");
-  assert.equal((await jarvis.handle("good morning")).tool, "claude_answer");
-  assert.equal(asked, 2);
+  assert.notEqual((await jarvis.handle("thanks")).tool, "claude_answer");
+  assert.notEqual((await jarvis.handle("how are you")).tool, "claude_answer");
+  assert.equal(asked, 0);
 });
 
 test("small talk skips choosing an action unless it mentions one, and repeats are caught", () => {
@@ -1148,6 +1148,8 @@ test("small talk skips choosing an action unless it mentions one, and repeats ar
   assert.ok(isRepeat("Always a pleasure, sir.", []));
   assert.ok(isRepeat("Indeed, sir.", [{ role: "assistant", content: "Indeed, sir." }]));
   assert.equal(isRepeat("Good morning, sir. Coffee first, I trust.", []), false);
+  assert.ok(isRepeat("Well enough. I am ready for whatever comes next, sir.", [{ role: "assistant", content: "Well enough, sir. I am ready for whatever comes next." }]));
+  assert.equal(isRepeat("Very well, sir. A quiet Sunday suits me.", [{ role: "assistant", content: "Very well, sir. Coffee is ready." }]), false);
 });
 
 test("facts and puzzles go to Claude too, and who built him never leaves the computer", async () => {

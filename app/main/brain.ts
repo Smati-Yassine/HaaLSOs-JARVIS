@@ -43,6 +43,8 @@ changed, adjusted, scheduled or started something. You have no sensors, calendar
 // A small model copies examples far better than it follows a description. These are original lines.
 const MANNER: Message[] = [
   ["good morning", "Good morning, sir. The day has made no serious errors yet."],
+  ["how are you?", "Very well, sir. Everything is running smoothly, which I try not to take personally."],
+  ["I'm tired", "Then I'd recommend sleep, sir. It has an excellent track record."],
   ["I haven't eaten all day", "Noted, sir. I expect your stomach will be filing a formal complaint."],
   ["I'll go to bed early tonight", "A bold forecast, sir. History is not on your side."],
   ["are you a real person?", "No, sir. I am software, though I try not to hold it against myself."],
@@ -223,11 +225,19 @@ async function plainAnswer(prompt: string, limit = 60): Promise<string> {
   return (message.content ?? "").trim();
 }
 
-const EXAMPLE_LINES = new Set(MANNER.filter((line) => line.role === "assistant").map((line) => line.content.toLowerCase()));
-// A reply that's one of the examples, or something Jarvis said a moment ago.
+const wordsOf = (text: string) => new Set(text.toLowerCase().replace(/\bsir\b/g, "").match(/[a-z']+/g) ?? []);
+// Nearly the same words, in any order: "Well enough, sir. I'm ready" and "Well enough. I'm ready, sir".
+const alike = (a: Set<string>, b: Set<string>) => {
+  if (!a.size || !b.size) return false;
+  let shared = 0;
+  for (const word of a) if (b.has(word)) shared += 1;
+  return shared / Math.max(a.size, b.size) >= 0.7;
+};
+const EXAMPLE_LINES = MANNER.filter((line) => line.role === "assistant").map((line) => wordsOf(line.content));
+// A reply that's one of the examples, or close to something Jarvis said recently.
 export const isRepeat = (answer: string, history: Message[]) => {
-  const said = answer.trim().toLowerCase();
-  return EXAMPLE_LINES.has(said) || history.slice(-8).some((line) => line.role === "assistant" && line.content.trim().toLowerCase() === said);
+  const said = wordsOf(answer);
+  return EXAMPLE_LINES.some((line) => alike(said, line)) || history.slice(-12).some((line) => line.role === "assistant" && alike(said, wordsOf(line.content)));
 };
 
 // "I just deleted my project" is news, not a request to close it. These stay conversation,
@@ -753,10 +763,9 @@ Rewritten:`);
       let depth = namedClaude ? "serious" : depthOf(clean(said));
       if (this.lastDepth !== "small" && looksLikeFollowUp(said)) depth = this.lastDepth;
       this.lastDepth = depth;
-      // Everything goes to Claude, small talk too: the small local model invents facts and copies
-      // its example lines word for word, so it repeated itself. Claude starts speaking in about
-      // 1.5 seconds. Not when the words contain something that must stay on this computer.
-      if (this.ctx.thinker && !containsSecret(said)) {
+      // Questions go to Claude: the small local model invents facts. Small talk stays here, as he
+      // asked: "how are you" has no reason to leave the computer. Nor does anything secret.
+      if (depth !== "small" && this.ctx.thinker && !containsSecret(said)) {
         const speech = this.ctx.speech?.();
         // When the answer is spoken as it comes, its first sentence is quicker than this would be.
         if (depth === "serious" && !speech) this.ctx.ack?.("One moment, sir.");
