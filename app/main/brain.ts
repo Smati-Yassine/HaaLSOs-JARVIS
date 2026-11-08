@@ -745,9 +745,15 @@ Rewritten:`);
       // local model takes ten to twenty and the small one invents facts. Not when the question
       // contains something that must stay on this computer.
       if (depth !== "small" && this.ctx.thinker && !containsSecret(said)) {
-        if (depth === "serious") this.ctx.ack?.("One moment, sir.");
-        const best = await this.ctx.thinker(this.forClaude(words, context));
-        if (best) return this.finish(said, speakable(best), "model", begin, "claude_answer");
+        const speech = this.ctx.speech?.();
+        // When the answer is spoken as it comes, its first sentence is quicker than this would be.
+        if (depth === "serious" && !speech) this.ctx.ack?.("One moment, sir.");
+        const best = await this.ctx.thinker(this.forClaude(words, context), speech?.push);
+        speech?.end();
+        if (best) {
+          const reply = this.finish(said, speakable(best), "model", begin, "claude_answer");
+          return speech?.spoke ? { ...reply, spoken: "" } : reply;
+        }
       }
       // The big model takes about ten seconds, so it's kept for reasoning, and for covering when
       // Claude can't answer (no plan left, or no internet).

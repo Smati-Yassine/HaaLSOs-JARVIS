@@ -36,7 +36,8 @@ const memory = new Memory(process.env.JARVIS_MEMORY || join(homedir(), ".Jarvis"
 const jarvis = new Jarvis({
   dryRun: process.env.JARVIS_DRY_RUN === "1",
   ack: (words) => voice?.say(words), // Searching takes seconds, so Jarvis says so first.
-  thinker: (prompt) => askClaudeOnce(prompt),
+  thinker: (prompt, onText) => askClaudeOnce(prompt, undefined, "claude", onText),
+  speech: () => voice?.stream() ?? null,
   clipboard: { read: () => clipboard.readText(), write: (text) => clipboard.writeText(text) },
 }, memory);
 let window: BrowserWindow | null = null;

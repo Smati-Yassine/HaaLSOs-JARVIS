@@ -15,7 +15,7 @@ import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { findArgs, inYourWords, rankFiles, reminderMessage, describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
-import { spokenForm } from "./voice.ts";
+import { SpeechStream, spokenForm } from "./voice.ts";
 import { identityAnswer } from "./identity.ts";
 import { answerPrompt, siteName, topResults } from "./web.ts";
 import { decodeReply, knownAction, pickWindow } from "./windows.ts";
@@ -177,6 +177,59 @@ test("a long spoken answer is read in full, without code or paths", () => {
   const essay = "This is one fairly ordinary sentence about nothing. ".repeat(40);
   const cut = spokenForm(essay);
   assert.ok(cut.length < 760 && cut.endsWith("The rest is in the chat, sir."), cut);
+});
+
+test("a streamed answer is spoken sentence by sentence, without code, and stops when the voice does", () => {
+  const said: [string, boolean][] = [];
+  const stream = new SpeechStream((text, more) => said.push([text, more]));
+  for (const piece of ["The sky is bl", "ue, sir. Sunlight ", "scatters.\n- **Blue** goes furthest\n```py\nprint(1)\n``` See ", "/src/a.py for more."]) stream.push(piece);
+  assert.deepEqual(said.map(([text]) => text), ["The sky is blue, sir.", "Sunlight scatters.", "Blue goes furthest."]);
+  stream.end();
+  assert.deepEqual(said.slice(3), [["See for more.", true], ["The code is in the chat, sir.", true], ["", false]]);
+  assert.ok(stream.spoke);
+
+  let live = true;
+  const cut: string[] = [];
+  const stopped = new SpeechStream((text) => cut.push(text), () => live);
+  stopped.push("First one. ");
+  live = false;
+  stopped.push("Second one. ");
+  stopped.end();
+  assert.deepEqual(cut, ["First one."]);
+
+  const long: string[] = [];
+  const essay = new SpeechStream((text) => long.push(text));
+  essay.push("This is one fairly ordinary sentence about nothing. ".repeat(40));
+  essay.end();
+  assert.equal(long.at(-2), "The rest is in the chat, sir.");
+});
+
+test("a streamed Claude answer isn't spoken twice", async () => {
+  const pushed: string[] = [];
+  const jarvis = new Jarvis({
+    dryRun: true,
+    thinker: async (_prompt, onText) => { onText?.("Leonardo da Vinci, sir. "); return "Leonardo da Vinci, sir."; },
+    speech: () => { const s = { spoke: false, push: (d: string) => { pushed.push(d); s.spoke = true; }, end: () => {} }; return s; },
+  });
+  const reply = await jarvis.handle("who painted the Mona Lisa?");
+  assert.equal(reply.say, "Leonardo da Vinci, sir.");
+  assert.equal(reply.spoken, "");
+  assert.deepEqual(pushed, ["Leonardo da Vinci, sir. "]);
+});
+
+test("streaming from Claude passes the text on and returns the whole answer", async () => {
+  const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-fake-claude-"));
+  const fake = joinPath(dir, "claude");
+  writeFileSync(fake, `#!/bin/sh
+cat > /dev/null
+echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello, "}}}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"sir."}}}'
+echo '{"type":"result","is_error":false,"result":"Hello, sir."}'
+`, { mode: 0o755 });
+  const pieces: string[] = [];
+  assert.equal(await askClaudeOnce("hi", "x", fake, (d) => pieces.push(d)), "Hello, sir.");
+  assert.deepEqual(pieces, ["Hello, ", "sir."]);
+  rmSync(dir, { recursive: true });
 });
 
 test("Jarvis knows who built him", () => {

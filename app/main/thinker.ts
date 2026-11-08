@@ -46,15 +46,43 @@ export function cleanEnv(): Record<string, string> {
 }
 
 // Null means no answer: the plan limit, no network, or Claude missing. The caller falls back.
-export function askClaudeOnce(prompt: string, system = CLAUDE_VOICE, file = "claude"): Promise<string | null> {
+// With onText, each piece of the answer is passed on as Claude writes it, so speaking can start
+// at the first sentence instead of waiting for the last.
+export function askClaudeOnce(prompt: string, system = CLAUDE_VOICE, file = "claude", onText?: (delta: string) => void): Promise<string | null> {
   return new Promise((done) => {
     const folder = join(homedir(), ".Jarvis");
+    const streaming = onText ? ["--output-format", "stream-json", "--include-partial-messages", "--verbose"] : [];
     const child = spawn(file, [
-      "-p", "--model", CLAUDE_MODEL, "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "", "--system-prompt", system,
+      "-p", "--model", CLAUDE_MODEL, "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "", "--system-prompt", system, ...streaming,
     ], { cwd: existsSync(folder) ? folder : homedir(), env: cleanEnv(), stdio: ["pipe", "pipe", "ignore"] });
     let output = "";
+    let written = "";
+    let result: string | null = null;
+    let failed = false;
     const timer = setTimeout(() => child.kill(), TIME_LIMIT);
-    child.stdout.on("data", (chunk) => (output += chunk));
+    const readLine = (line: string) => {
+      try {
+        const event = JSON.parse(line);
+        const delta = event.type === "stream_event" && event.event?.type === "content_block_delta" ? event.event.delta?.text : undefined;
+        if (typeof delta === "string") {
+          written += delta;
+          onText!(delta);
+        }
+        if (event.type === "result") {
+          failed = Boolean(event.is_error);
+          if (typeof event.result === "string") result = event.result;
+        }
+      } catch {
+        // Only whole JSON lines are messages.
+      }
+    };
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (!onText) return;
+      const lines = output.split("\n");
+      output = lines.pop() ?? "";
+      lines.forEach(readLine);
+    });
     child.stdin.on("error", () => {});
     child.on("error", () => {
       clearTimeout(timer);
@@ -62,6 +90,12 @@ export function askClaudeOnce(prompt: string, system = CLAUDE_VOICE, file = "cla
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (onText) {
+        if (output.trim()) readLine(output);
+        // Whatever was already spoken is the answer, even if Claude stopped partway.
+        const answer = (failed ? "" : (result ?? written)).trim() || written.trim();
+        return done(answer || null);
+      }
       const answer = output.trim();
       done(code === 0 && answer ? answer : null);
     });

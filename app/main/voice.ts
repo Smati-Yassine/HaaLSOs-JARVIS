@@ -24,12 +24,9 @@ const looksLikeOutput = (text: string) => {
   return letters / text.length < 0.75 || !/[a-z]{3,} [a-z]{2,} [a-z]{2,}/i.test(text);
 };
 
-// What the voice reads: the full answer, made speakable. Code, links and paths stay in the chat.
-export function spokenForm(text: string): string {
-  let plain = text.trim();
-  if (plain.length <= 240 && !plain.includes("```")) return plain;
-  const hadCode = /```/.test(plain);
-  plain = plain
+// Markdown, links and paths made into something a voice can say.
+function speechText(text: string): string {
+  return text
     .replace(/```[\s\S]*?(```|$)/g, " ")
     .replace(/https?:\/\/\S+/g, "a link")
     .replace(/(^|\s)(~|\.{0,2})?\/[\w.\/-]+/g, " ")
@@ -38,6 +35,14 @@ export function spokenForm(text: string): string {
     .replace(/\*\*?|`|_{2}/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// What the voice reads: the full answer, made speakable. Code, links and paths stay in the chat.
+export function spokenForm(text: string): string {
+  let plain = text.trim();
+  if (plain.length <= 240 && !plain.includes("```")) return plain;
+  const hadCode = /```/.test(plain);
+  plain = speechText(plain);
   if (!plain || looksLikeOutput(plain)) return "That's a long answer, sir. It's in the chat.";
   const sentences = plain.match(/[^.!?]+[.!?]+["')]*|[^.!?]+$/g)?.map((part) => part.trim()) ?? [plain];
   let spoken = "";
@@ -48,8 +53,78 @@ export function spokenForm(text: string): string {
   return hadCode ? `${spoken} The code is in the chat, sir.` : spoken;
 }
 
+// Speaks an answer while it's still being written: each finished sentence goes to the voice at
+// once. Code is skipped, and past the usual length it says where the rest is.
+export class SpeechStream {
+  private buffer = "";
+  private inCode = false;
+  private hadCode = false;
+  private length = 0;
+  private full = false;
+  spoke = false;
+
+  private readonly out: (text: string, more: boolean) => void;
+  private readonly live: () => boolean;
+
+  constructor(out: (text: string, more: boolean) => void, live: () => boolean = () => true) {
+    this.out = out;
+    this.live = live;
+  }
+
+  push = (delta: string) => {
+    this.buffer += delta;
+    for (;;) {
+      if (this.inCode) {
+        const close = this.buffer.indexOf("```");
+        if (close < 0) return;
+        this.buffer = this.buffer.slice(close + 3);
+        this.inCode = false;
+        continue;
+      }
+      const fence = this.buffer.indexOf("```");
+      const end = this.buffer.search(/[.!?]["')]*\s|\n/);
+      if (fence >= 0 && (end < 0 || fence < end)) {
+        this.sentence(this.buffer.slice(0, fence));
+        this.buffer = this.buffer.slice(fence + 3);
+        this.inCode = this.hadCode = true;
+        continue;
+      }
+      if (end < 0) return;
+      const cut = this.buffer.slice(end).match(/^[.!?]["')]*\s|^\n/)![0].length + end;
+      this.sentence(this.buffer.slice(0, cut));
+      this.buffer = this.buffer.slice(cut);
+    }
+  };
+
+  end() {
+    if (!this.inCode) this.sentence(this.buffer);
+    this.buffer = "";
+    if (this.hadCode && this.spoke && !this.full) this.send("The code is in the chat, sir.");
+    if (this.spoke && this.live()) this.out("", false);
+  }
+
+  private sentence(raw: string) {
+    const text = raw.trim() ? speechText(raw) : "";
+    if (!text || this.full || !/[a-z0-9]/i.test(text)) return;
+    if (this.spoke && this.length + text.length > MAX_SPOKEN) {
+      this.full = true;
+      return this.send("The rest is in the chat, sir.");
+    }
+    this.length += text.length;
+    this.send(text);
+  }
+
+  private send(text: string) {
+    if (!this.live()) return;
+    this.spoke = true;
+    this.out(text, true);
+  }
+}
+
 export class Voice {
   private child: ChildProcessWithoutNullStreams | null = null;
+  // Counts stops, so an answer still streaming in after one isn't spoken.
+  private turn = 0;
 
   private readonly folder: string;
   private readonly onEvent: (event: VoiceEvent) => void;
@@ -92,7 +167,13 @@ export class Voice {
   say(text: string, thenListen = false) {
     if (text.trim()) this.send({ type: "speak", text: spokenForm(text), then_listen: thenListen });
   }
+  // For an answer that's still being written. Nothing more is spoken once something stops the voice.
+  stream(): SpeechStream {
+    const turn = this.turn;
+    return new SpeechStream((text, more) => this.send({ type: "speak", text, then_listen: false, more }), () => this.turn === turn);
+  }
   stop() {
+    this.turn += 1;
     this.send({ type: "stop" });
   }
   listen() {
