@@ -10,6 +10,7 @@ import { Jarvis, pruneLog, summarize, unloadModel, type Pending, type Reply } fr
 import { ClaudeManager, describeActivity, type Gate } from "./claude.ts";
 import { pickOption } from "./fastpath.ts";
 import { Memory } from "./memory.ts";
+import { listProjects } from "./projects.ts";
 import { classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { healthCheck, setStartAtLogin, startsAtLogin } from "./system.ts";
 import { Voice, type VoiceEvent } from "./voice.ts";
@@ -438,6 +439,14 @@ ipcMain.handle("facts:list", () => memory.allFacts());
 ipcMain.handle("facts:delete", (_event, id: unknown) => jarvis.forgetFact(Number(id)));
 ipcMain.handle("reminders:list", () => memory.upcomingReminders());
 ipcMain.handle("reminders:delete", (_event, id: unknown) => memory.deleteReminder(Number(id)));
+// The folders the Claude button offers to open. Hidden folders are already left out.
+ipcMain.handle("projects:list", () => {
+  try {
+    return listProjects().sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
+  } catch {
+    return [];
+  }
+});
 ipcMain.handle("jarvis:warm-up", () => jarvis.warmUp().then(() => true, () => false));
 ipcMain.handle("jarvis:welcome", (_event, text: unknown) => {
   const tag = voiceReady ? nextTag() : undefined;

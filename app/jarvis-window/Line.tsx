@@ -1,573 +1,120 @@
-// Jarvis himself: one glowing line across the window. Above it is Jarvis, below it is Claude, and
-// the message box sits on it. Whatever is running peels off it as a strand.
-import gsap from "gsap";
+// Jarvis himself: one glowing line, drawn on the top edge of the message box. It shows what he is
+// doing from the corner of your eye: breathing while idle, moving while he listens, a pulse
+// travelling along it while he thinks, a waveform while he speaks, and amber while he waits on you.
 import { useEffect, useRef } from "react";
 
 export type Mood = "idle" | "listening" | "thinking" | "speaking";
-export type Snap = "high" | "mid" | "low";
-export type StrandItem = { id: string; kind: "claude" | "shell" | "timer"; title: string; active: boolean; working: boolean; asking: boolean; frac: number };
 
-const MOODS: Record<Mood, { energy: number; speed: number; think: number }> = {
-  idle: { energy: 0.06, speed: 1, think: 0 },
-  listening: { energy: 0.35, speed: 1.4, think: 0 },
-  thinking: { energy: 0.16, speed: 2.4, think: 1 },
-  speaking: { energy: 1, speed: 1.6, think: 0 },
-};
-const LAYERS = [
-  { alpha: 1, freqA: 1.6, freqB: 2.3, drift: 1.1, glow: 14 },
-  { alpha: 0.35, freqA: 1.1, freqB: 3.1, drift: -1.4, glow: 0 },
-  { alpha: 0.16, freqA: 2.1, freqB: 1.3, drift: 0.8, glow: 0 },
-];
-type Layer = (typeof LAYERS)[number];
-type Strand = { item: StrandItem; group: string; depth: number; x1: number | null; x2: number; tx1: number; tx2: number; dying: boolean; textWidth: number; hover: number };
-type Packet = { strand: Strand; toClaude: boolean; progress: number };
-
-const TAU = Math.PI * 2;
-const NARROW = 760; // Must match the max-width media query in styles.css.
-// A tab is a rounded pod hanging off the line, the same shape as the message box, with its title inside.
-const CORNER = 18;
-const POD_DEPTH = 27;
-const POD_PADDING = 36;
-const POD_MIN = 76;
-const POD_MAX = 216;
-const POD_GAP = 4;
 const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-function stored(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function store(key: string, value: string) {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    // It just won't be remembered.
-  }
+type Colors = { ink: string; amber: string; glow: string };
+function readColors(): Colors {
+  const style = getComputedStyle(document.documentElement);
+  return {
+    ink: style.getPropertyValue("--ink").trim() || "#fff",
+    amber: style.getPropertyValue("--amber").trim() || "#ffb02e",
+    glow: style.getPropertyValue("--glow").trim() || "rgba(255,255,255,0.55)",
+  };
 }
 
-// Holds everything that moves every frame, so moving the line never re-renders the app.
-export class LineEngine {
-  state = { ...MOODS.idle, kick: 0 };
-  span = calm ? 1 : 0;
-  snap: Snap = (["high", "mid", "low"] as const).find((name) => name === stored("jarvis-line")) ?? "mid";
-  moved = stored("jarvis-line-moved") === "1";
-  onMoved: (() => void) | null = null;
-  onSnap: ((snap: Snap) => void) | null = null;
-  project = false;
-  prefs = false;
+function draw(canvas: HTMLCanvasElement, mood: Mood, asking: boolean, colors: Colors, t: number) {
+  const ratio = Math.min(2, devicePixelRatio || 1);
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (!w || !h) return;
+  if (canvas.width !== Math.round(w * ratio) || canvas.height !== Math.round(h * ratio)) {
+    canvas.width = Math.round(w * ratio);
+    canvas.height = Math.round(h * ratio);
+  }
+  const g = canvas.getContext("2d");
+  if (!g) return;
+  g.setTransform(ratio, 0, 0, ratio, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const mid = h / 2;
+  const color = asking ? colors.amber : colors.ink;
+  const fade = g.createLinearGradient(0, 0, w, 0);
+  fade.addColorStop(0, "transparent");
+  fade.addColorStop(0.12, color);
+  fade.addColorStop(0.88, color);
+  fade.addColorStop(1, "transparent");
 
-  private y = 0;
-  private velocity = 0;
-  private dragging = false;
-  private grab = 0;
-  private lastPointer = { y: 0, time: 0 };
-  private hot = 0;
-  private reach = 430;
-  private time = 0;
-  private amplitude = 8;
-  private width = 1;
-  private height = 1;
-  private boxHeight = 52;
-  private boxWidth = 0;
-  private decisionHeight = 0;
-  private written = { y: -1, boxTop: -1, tight: false };
-  private segments: [number, number][] = [[0, 1]];
-  private podSpans: { from: number; to: number; strength: number }[] = [];
-  private strands = new Map<string, Strand>();
-  private labels = new Map<string, HTMLElement>();
-  private packets: Packet[] = [];
-  private tokens = { ink: "#fff", amber: "#fb0", claude: "#d97757", mute: "#999", glow: 1 };
-  private root: HTMLElement | null = null;
-  private ctx: CanvasRenderingContext2D | null = null;
-
-  get narrow() {
-    return this.width < NARROW;
-  }
-  private get clearance() {
-    return this.narrow ? this.boxHeight + 44 : this.boxHeight - 26;
-  }
-  private snapY(name: Snap): number {
-    const high = 36 + 96 + 14 + this.clearance;
-    // All the way down, only the strands of Claude's side stay in view.
-    const low = Math.max(high + 80, this.height - 50);
-    if (name === "high") return high;
-    if (name === "low") return low;
-    return Math.min(low - 40, Math.max(high + 40, this.height * 0.42));
-  }
-  private targetY(): number {
-    const bottom = this.height - (this.narrow ? 20 : 62);
-    if (this.prefs) return bottom;
-    let base = this.project ? this.snapY(this.snap) : Math.max(36 + 96 + 14 + this.clearance, Math.min(this.height * 0.68, this.height - 130));
-    // A question always gets enough room to be read, then the line goes back.
-    if (this.decisionHeight) base = Math.max(base, Math.min(bottom, 36 + 14 + this.clearance + this.decisionHeight + 18));
-    return base;
+  let amp = 0;
+  let freq = 0;
+  let speed = 0;
+  if (asking) {
+    amp = h * 0.06 * (0.6 + 0.4 * Math.sin(t * 3));
+    freq = 0.012;
+    speed = 1.4;
+  } else if (mood === "listening") {
+    amp = h * 0.26;
+    freq = 0.045;
+    speed = 7;
+  } else if (mood === "speaking") {
+    amp = h * 0.34;
+    freq = 0.028;
+    speed = 4;
   }
 
-  setSnap(name: Snap) {
-    this.snap = name;
-    store("jarvis-line", name);
-    this.onSnap?.(name);
-  }
-  private markMoved() {
-    if (this.moved) return;
-    this.moved = true;
-    store("jarvis-line-moved", "1");
-    this.onMoved?.();
-  }
-  step(direction: 1 | -1) {
-    const order: Snap[] = ["low", "mid", "high"];
-    this.setSnap(order[Math.max(0, Math.min(2, order.indexOf(this.snap) + direction))]);
-    this.markMoved();
-  }
-  toggle() {
-    this.setSnap(this.snap === "high" ? "mid" : "high");
-    this.markMoved();
-  }
-  beginDrag(pointerY: number, time: number) {
-    if (this.prefs) return;
-    this.dragging = true;
-    this.grab = pointerY - this.y;
-    this.velocity = 0;
-    this.lastPointer = { y: this.y, time };
-  }
-  moveDrag(pointerY: number, time: number) {
-    if (!this.dragging) return;
-    const y = Math.max(this.snapY("high"), Math.min(this.snapY("low"), pointerY - this.grab));
-    const elapsed = Math.max(1, time - this.lastPointer.time) / 1000;
-    this.velocity = this.velocity * 0.6 + ((y - this.lastPointer.y) / elapsed) * 0.4;
-    this.lastPointer = { y, time };
-    this.y = y;
-  }
-  endDrag() {
-    if (!this.dragging) return;
-    this.dragging = false;
-    const aim = this.y + this.velocity * 0.16;
-    const nearest = (["high", "mid", "low"] as const).reduce((a, b) => (Math.abs(this.snapY(b) - aim) < Math.abs(this.snapY(a) - aim) ? b : a));
-    this.setSnap(nearest);
-    this.velocity = Math.max(-1800, Math.min(1800, this.velocity));
-    this.markMoved();
-  }
-
-  // The window tells the line what's running. Things that stop merge back in instead of vanishing.
-  sync(group: string, items: StrandItem[]) {
-    const ids = new Set(items.map((item) => item.id));
-    for (const strand of this.strands.values()) {
-      if (strand.group === group && !ids.has(strand.item.id)) strand.dying = true;
+  g.lineWidth = 1.6;
+  g.strokeStyle = fade;
+  g.shadowColor = asking ? colors.amber : colors.glow;
+  g.shadowBlur = mood === "idle" && !asking ? 6 + 4 * Math.sin(t * 1.4) : 12;
+  g.beginPath();
+  for (let x = 0; x <= w; x += 2) {
+    const envelope = Math.sin(Math.PI * (x / w)) ** 2;
+    let y = 0;
+    if (amp) {
+      const voice = mood === "speaking" && !asking ? 0.55 + 0.45 * Math.sin(t * 2.3 + Math.sin(t * 0.9) * 2) : 1;
+      y = amp * envelope * voice * (Math.sin(x * freq + t * speed) * 0.6 + Math.sin(x * freq * 2.3 - t * speed * 1.3) * 0.3 + Math.sin(x * freq * 5.1 + t * speed * 0.7) * 0.15);
     }
-    for (const item of items) {
-      const strand = this.strands.get(item.id);
-      const textWidth = this.measure(item);
-      if (strand) {
-        strand.item = item;
-        strand.dying = false;
-        strand.textWidth = textWidth;
-      } else {
-        this.strands.set(item.id, { item, group, depth: 0, x1: null, x2: 0, tx1: 0, tx2: 0, dying: false, textWidth, hover: 0 });
-      }
-    }
+    if (x === 0) g.moveTo(x, mid + y);
+    else g.lineTo(x, mid + y);
   }
-  private measure(item: StrandItem) {
-    if (!this.ctx) return 80;
-    this.ctx.save();
-    this.ctx.font = item.kind === "shell" ? '400 12px "Geist Mono Variable"' : '500 13px "Geist Variable"';
-    const width = this.ctx.measureText(item.kind === "shell" ? `> ${item.title}` : item.title).width;
-    this.ctx.restore();
-    return width + 4;
-  }
-  label(id: string, element: HTMLElement | null) {
-    if (element) this.labels.set(id, element);
-    else this.labels.delete(id);
-  }
-  // A small light travels along the line when Jarvis and Claude pass something on.
-  packet(id: string | undefined, toClaude: boolean) {
-    const strand = id ? this.strands.get(id) : undefined;
-    if (strand && !calm) this.packets.push({ strand, toClaude, progress: 0 });
-  }
-  watchBox(box: HTMLElement) {
-    const observer = new ResizeObserver(() => {
-      this.boxHeight = box.offsetHeight || 52;
-      this.boxWidth = box.offsetWidth;
-      this.written.boxTop = -1;
-    });
-    observer.observe(box);
-    return () => observer.disconnect();
-  }
-  watchDecision(element: HTMLElement | null) {
-    if (!element) {
-      this.decisionHeight = 0;
-      return () => {};
-    }
-    const observer = new ResizeObserver(() => (this.decisionHeight = element.offsetHeight));
-    observer.observe(element);
-    this.decisionHeight = element.offsetHeight;
-    this.state.kick = 1;
-    return () => {
-      observer.disconnect();
-      this.decisionHeight = 0;
-    };
-  }
-  readTokens() {
-    const styles = getComputedStyle(document.documentElement);
-    const read = (name: string) => styles.getPropertyValue(`--${name}`).trim();
-    this.tokens = { ink: read("ink"), amber: read("amber"), claude: read("claude"), mute: read("mute"), glow: document.documentElement.dataset.mode === "dark" ? 1 : 0 };
-  }
+  g.stroke();
 
-  start(canvas: HTMLCanvasElement) {
-    this.ctx = canvas.getContext("2d");
-    this.root = canvas.closest(".shell");
-    this.readTokens();
-    const resize = () => {
-      this.width = Math.max(1, innerWidth);
-      this.height = Math.max(1, innerHeight);
-      const scale = Math.min(devicePixelRatio || 1, 2);
-      canvas.width = this.width * scale;
-      canvas.height = this.height * scale;
-      this.ctx!.setTransform(scale, 0, 0, scale, 0, 0);
-      this.written.y = -1;
-    };
-    addEventListener("resize", resize);
-    resize();
-    // A title measured before its font arrives comes out too narrow, so measure again once it has.
-    const remeasure = () => {
-      for (const strand of this.strands.values()) strand.textWidth = this.measure(strand.item);
-    };
-    document.fonts.addEventListener("loadingdone", remeasure);
-    void document.fonts.load('400 12px "Geist Mono Variable"');
-    void document.fonts.load('500 13px "Geist Variable"');
-    if (!this.y) this.y = this.targetY();
-    let frame = 0;
-    let last = performance.now();
-    const draw = (now: number) => {
-      frame = requestAnimationFrame(draw);
-      const dt = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      this.draw(dt);
-    };
-    frame = requestAnimationFrame(draw);
-    return () => {
-      cancelAnimationFrame(frame);
-      removeEventListener("resize", resize);
-      document.fonts.removeEventListener("loadingdone", remeasure);
-    };
+  if (mood === "thinking" && !asking) {
+    const at = (((t * 0.55) % 1.3) - 0.15) * w;
+    const reach = w * 0.12;
+    const pulse = g.createRadialGradient(at, mid, 0, at, mid, reach);
+    pulse.addColorStop(0, colors.ink);
+    pulse.addColorStop(1, "transparent");
+    g.shadowBlur = 16;
+    g.strokeStyle = pulse;
+    g.lineWidth = 2.6;
+    g.beginPath();
+    g.moveTo(Math.max(0, at - reach), mid);
+    g.lineTo(Math.min(w, at + reach), mid);
+    g.stroke();
   }
-
-  // Everything else in the window positions itself from these two numbers.
-  private writeLayout() {
-    if (!this.root) return;
-    const boxBottom = this.narrow ? this.y - 44 : this.y + 26;
-    const boxTop = boxBottom - this.boxHeight;
-    if (Math.abs(this.y - this.written.y) < 0.1 && Math.abs(boxTop - this.written.boxTop) < 0.1) return;
-    this.written.y = this.y;
-    this.written.boxTop = boxTop;
-    this.root.style.setProperty("--ly", `${this.y}px`);
-    this.root.style.setProperty("--box-top", `${boxTop}px`);
-    const tight = boxTop - 50 < 170;
-    if (tight !== this.written.tight) {
-      this.written.tight = tight;
-      this.root.dataset.room = tight ? "tight" : "wide";
-    }
-  }
-
-  private layerY(x: number, segment: [number, number], layer: Layer) {
-    const u = (x - segment[0]) / (segment[1] - segment[0]);
-    const envelope = Math.sin(Math.PI * Math.min(u, 1)) ** 2 * this.calmUnderPods(x);
-    const wave =
-      Math.sin(u * layer.freqA * TAU + this.time * layer.drift * 2) * 0.6 +
-      Math.sin(u * layer.freqB * TAU - this.time * layer.drift * 3) * 0.4;
-    return this.y + envelope * this.amplitude * wave;
-  }
-  // The line settles where a tab hangs from it, so titles stay readable while Jarvis speaks.
-  private calmUnderPods(x: number) {
-    let calmness = 1;
-    for (const pod of this.podSpans) {
-      const outside = Math.max(pod.from - x, x - pod.to, 0);
-      if (outside < 36) calmness = Math.min(calmness, 1 - pod.strength * 0.86 * (1 - outside / 36) ** 2);
-    }
-    return calmness;
-  }
-  private waveY(x: number) {
-    const segment = this.segments.find((part) => x >= part[0] && x <= part[1]);
-    return segment ? this.layerY(x, segment, LAYERS[0]) : this.y;
-  }
-
-  // Lays pods out from one end of a stretch of line, each as wide as its title. If they don't all
-  // fit, they share what's there and the titles shorten.
-  private layOut(pods: Strand[], start: number, end: number) {
-    if (!pods.length) return;
-    const wanted = pods.map((pod) => Math.max(POD_MIN, Math.min(POD_MAX, pod.textWidth + POD_PADDING)));
-    const room = end - start - POD_GAP * (pods.length - 1);
-    // Only the longest titles give way, so short ones are never cut off to make room for them.
-    let cap = POD_MAX;
-    const used = () => wanted.reduce((sum, width) => sum + Math.min(width, cap), 0);
-    while (cap > 40 && used() > room) cap -= 2;
-    let x = start;
-    pods.forEach((pod, index) => {
-      pod.tx1 = x;
-      pod.tx2 = x + Math.min(wanted[index], cap);
-      x = pod.tx2 + POD_GAP;
-    });
-  }
-  private placeStrands() {
-    const live = [...this.strands.values()].filter((strand) => !strand.dying);
-    // Until the box has been measured, or on a narrow window, the line is one unbroken piece.
-    const whole = this.segments.length < 2;
-    const leftEnd = whole ? this.width * 0.6 : this.segments[0][1] - 12;
-    const rightStart = whole ? this.width * 0.6 : this.segments[1][0] + 12;
-    this.layOut(live.filter((strand) => strand.item.kind === "claude"), 12, leftEnd);
-    this.layOut(live.filter((strand) => strand.item.kind === "shell"), rightStart, this.width - 100); // Clear of the buttons.
-    // Timers hang above the line from the far right, and shrink back toward it as time runs out.
-    let right = this.width - 12;
-    for (const pod of live.filter((strand) => strand.item.kind === "timer")) {
-      pod.tx2 = right;
-      pod.tx1 = right - (72 + 70 * Math.max(0, Math.min(1, pod.item.frac)));
-      right = pod.tx1 - POD_GAP;
-    }
-  }
-  private strandLift(strand: Strand, x: number) {
-    const edge = Math.min(x - strand.x1!, strand.x2 - x) / CORNER;
-    if (edge <= 0) return 0;
-    // A quarter of an ellipse, for a rounded corner.
-    return edge >= 1 ? 1 : Math.sqrt(1 - (1 - edge) ** 2);
-  }
-  private drawStrand(ctx: CanvasRenderingContext2D, strand: Strand, dt: number) {
-    if (strand.x1 === null) {
-      strand.x1 = strand.tx1;
-      strand.x2 = strand.tx2;
-    }
-    const ease = 1 - Math.exp(-dt * 10);
-    strand.x1 += (strand.tx1 - strand.x1) * ease;
-    strand.x2 += (strand.tx2 - strand.x2) * ease;
-    const { item } = strand;
-    // A question flips Claude's pod up through the line, onto Jarvis's side.
-    const want = strand.dying ? 0 : item.kind === "timer" ? -23 : item.asking ? -POD_DEPTH : POD_DEPTH;
-    strand.depth += (want - strand.depth) * (1 - Math.exp(-dt * (strand.dying ? 12 : 8)));
-    strand.hover += ((this.hovered === item.id ? 1 : 0) - strand.hover) * (1 - Math.exp(-dt * 14));
-
-    const span = strand.x2 - strand.x1;
-    const label = this.labels.get(item.id);
-    if (label) {
-      // The title rides inside its pod, so the pod and its title sway with the line together.
-      const middle = this.waveY(strand.x1 + span / 2) - this.y + strand.depth / 2;
-      label.style.left = `${strand.x1}px`;
-      label.style.width = `${Math.max(0, span)}px`;
-      label.style.transform = `translateY(${middle - 12}px)`;
-      label.style.opacity = String(Math.min(1, Math.abs(strand.depth) / 18));
-    }
-    if (span < 4) return;
-
-    const color = item.asking ? this.tokens.amber : item.kind === "claude" ? this.tokens.claude : item.kind === "timer" ? this.tokens.ink : this.tokens.mute;
-    const strong = item.active || item.asking;
-    // Finely around the corners, where the curve is tight, and coarsely along the flat.
-    const points: [number, number][] = [];
-    const add = (x: number) => points.push([x, this.waveY(x) + strand.depth * this.strandLift(strand, x)]);
-    const fine = Math.min(CORNER, span / 2);
-    for (let x = 0; x < fine; x += x < 3 ? 0.25 : 1) add(strand.x1 + x);
-    for (let x = strand.x1 + fine; x < strand.x2 - fine; x += 4) add(x);
-    for (let x = fine; x >= 0; x -= x <= 3 ? 0.25 : 1) add(strand.x2 - x);
-
-    // The open tab is filled with its colour, fading out toward the line.
-    const fill = strong ? (this.tokens.glow ? 0.17 : 0.2) : strand.hover * 0.09;
-    if (fill > 0.004) {
-      ctx.beginPath();
-      points.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-      for (let x = strand.x2; x > strand.x1; x -= 6) ctx.lineTo(x, this.waveY(x));
-      ctx.closePath();
-      const gradient = ctx.createLinearGradient(0, this.y, 0, this.y + strand.depth);
-      gradient.addColorStop(0, "transparent");
-      gradient.addColorStop(1, color);
-      ctx.globalAlpha = fill;
-      ctx.fillStyle = gradient;
-      ctx.fill();
-    }
-    ctx.beginPath();
-    points.forEach(([x, y], index) => (index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-    const pulse = item.asking && !calm ? 0.75 + 0.25 * Math.sin(this.time * 5) : 1;
-    ctx.globalAlpha = (item.kind === "timer" ? 0.55 : strong ? 1 : 0.42 + strand.hover * 0.4) * pulse;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = strong ? 1.5 : 1.2;
-    ctx.lineJoin = "round";
-    ctx.shadowColor = color;
-    ctx.shadowBlur = (strong ? 9 : 0) * this.tokens.glow;
-    ctx.stroke();
-
-    // While a session works, a light runs back and forth along its pod.
-    if (item.working && !item.asking && !calm && span > 2 * CORNER + 24) {
-      const start = strand.x1 + CORNER + (Math.sin(this.time * 2.2) * 0.5 + 0.5) * (span - 2 * CORNER - 24);
-      ctx.beginPath();
-      for (let x = start; x <= start + 24; x += 3) {
-        const y = this.waveY(x) + strand.depth;
-        if (x === start) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = this.tokens.ink;
-      ctx.lineWidth = 2;
-      ctx.shadowColor = color;
-      ctx.shadowBlur = 12 * this.tokens.glow;
-      ctx.stroke();
-    }
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
-  }
-  private drawPackets(ctx: CanvasRenderingContext2D, dt: number) {
-    this.packets = this.packets.filter((packet) => {
-      packet.progress = Math.min(1, packet.progress + dt / 0.62);
-      const p = packet.progress;
-      const eased = p < 0.5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2;
-      const strand = packet.strand;
-      if (strand.x1 === null) return false;
-      const from = this.narrow ? this.width / 2 : this.segments[0][1];
-      const to = (strand.x1 + strand.x2) / 2;
-      const x = packet.toClaude ? from + (to - from) * eased : to + (from - to) * eased;
-      ctx.fillStyle = this.tokens.ink;
-      ctx.shadowColor = this.tokens.claude;
-      ctx.shadowBlur = 16 * this.tokens.glow;
-      ctx.beginPath();
-      ctx.arc(x, this.waveY(x) + strand.depth * this.strandLift(strand, x), 2.8, 0, TAU);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      if (p >= 1) this.state.kick = Math.max(this.state.kick, 0.5);
-      return p < 1;
-    });
-  }
-
-  private draw(dt: number) {
-    const ctx = this.ctx!;
-    const s = this.state;
-    this.time += dt * (calm ? 0.12 : 1) * s.speed;
-    s.kick *= 0.9;
-    const wantHot = this.dragging || this.handleHover ? 1 : 0;
-    this.hot += (wantHot - this.hot) * (1 - Math.exp(-dt * 12));
-    this.reach += ((this.project ? 70 : this.narrow ? 300 : 430) - this.reach) * (1 - Math.exp(-dt * 3));
-
-    if (!this.dragging) {
-      const target = this.targetY();
-      if (calm) {
-        this.y = target;
-      } else {
-        // A spring, so the line settles like something with weight.
-        this.velocity += ((target - this.y) * 170 - this.velocity * 24) * dt;
-        this.y += this.velocity * dt;
-        if (Math.abs(target - this.y) < 0.05 && Math.abs(this.velocity) < 0.5) {
-          this.y = target;
-          this.velocity = 0;
-        }
-      }
-    }
-    this.writeLayout();
-    if (this.narrow || !this.boxWidth) {
-      this.segments = [[0, this.width]];
-    } else {
-      const left = (this.width - this.boxWidth) / 2;
-      this.segments = [[0, left], [left + this.boxWidth, this.width]];
-    }
-    this.placeStrands();
-    this.podSpans = [...this.strands.values()].filter((pod) => pod.x1 !== null).map((pod) => ({ from: pod.x1!, to: pod.x2, strength: Math.min(1, Math.abs(pod.depth) / 18) }));
-
-    ctx.clearRect(0, 0, this.width, this.height);
-    const talk = (Math.sin(this.time * 11) * 0.5 + Math.sin(this.time * 6.7) * 0.3 + Math.sin(this.time * 17.3) * 0.2) * 0.5 + 0.5;
-    const energy = Math.min(1.2, s.energy + s.kick * 0.3);
-    this.amplitude = this.reach * (0.012 + energy * 0.24 * (0.55 + talk * 0.45));
-
-    ctx.save();
-    const half = (this.width / 2) * this.span;
-    ctx.beginPath();
-    ctx.rect(this.width / 2 - half, 0, half * 2, this.height);
-    ctx.clip();
-    for (const segment of this.segments) {
-      if (segment[1] - segment[0] < 4) continue;
-      for (const layer of LAYERS) {
-        ctx.beginPath();
-        for (let x = segment[0]; x <= segment[1]; x += 3) {
-          const y = this.layerY(x, segment, layer);
-          if (x === segment[0]) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        ctx.lineTo(segment[1], this.y);
-        ctx.globalAlpha = layer.alpha;
-        ctx.strokeStyle = this.tokens.ink;
-        ctx.lineWidth = layer.glow ? 1.6 + this.hot * 0.9 : 1;
-        ctx.shadowColor = this.tokens.ink;
-        ctx.shadowBlur = (layer.glow ? layer.glow + this.hot * 8 : 0) * this.tokens.glow;
-        ctx.stroke();
-      }
-    }
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
-    for (const [id, strand] of this.strands) {
-      this.drawStrand(ctx, strand, dt);
-      if (strand.dying && Math.abs(strand.depth) < 0.4) this.strands.delete(id);
-    }
-    this.drawPackets(ctx, dt);
-    if (s.think > 0.01) {
-      const x = this.width * (0.5 + 0.42 * Math.sin(this.time * 1.6));
-      ctx.globalAlpha = s.think;
-      ctx.fillStyle = this.tokens.amber;
-      ctx.shadowColor = this.tokens.amber;
-      ctx.shadowBlur = 18 * this.tokens.glow;
-      ctx.beginPath();
-      ctx.arc(x, this.waveY(x), 4, 0, TAU);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.globalAlpha = 1;
-    }
-    ctx.restore();
-  }
-
-  handleHover = false;
-  hovered: string | null = null;
 }
 
-export function Line({ engine, mood, pulse, movable }: { engine: LineEngine; mood: Mood; pulse: number; movable: boolean }) {
+export function VoiceLine({ mood, asking, mode }: { mood: Mood; asking: boolean; mode: string }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  const state = useRef({ mood, asking, colors: readColors() });
+  state.current.mood = mood;
+  state.current.asking = asking;
+
+  // The colors come from the theme, so they're read again whenever it changes.
+  useEffect(() => {
+    state.current.colors = readColors();
+    if (calm && canvas.current) draw(canvas.current, state.current.mood, state.current.asking, state.current.colors, 0);
+  }, [mode]);
 
   useEffect(() => {
-    const target = MOODS[mood];
-    if (calm) Object.assign(engine.state, target);
-    else gsap.to(engine.state, { ...target, duration: 0.6, ease: "power2.out", overwrite: "auto" });
-  }, [engine, mood]);
+    if (calm) {
+      if (canvas.current) draw(canvas.current, mood, asking, state.current.colors, 0);
+      return;
+    }
+    let frame = 0;
+    const tick = (ms: number) => {
+      const element = canvas.current;
+      if (element && element.offsetParent !== null) draw(element, state.current.mood, state.current.asking, state.current.colors, ms / 1000);
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+    // In calm mode the line is redrawn only when what it shows changes.
+  }, [calm ? `${mood}${asking}` : ""]);
 
-  useEffect(() => {
-    engine.state.kick = 1;
-  }, [engine, pulse]);
-
-  useEffect(() => {
-    const stop = engine.start(canvas.current!);
-    // On boot the line draws itself out from the middle of the window.
-    if (!calm) gsap.to(engine, { span: 1, duration: 1.1, delay: 0.1, ease: "power3.out" });
-    return stop;
-  }, [engine]);
-
-  return (
-    <>
-      <canvas ref={canvas} className="line" role="img" aria-label={`Jarvis is ${mood}`} />
-      {movable && (
-        <div
-          className="line-handle"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Move the line. Up gives Claude more room, down gives Jarvis more."
-          tabIndex={0}
-          onPointerEnter={() => (engine.handleHover = true)}
-          onPointerLeave={() => (engine.handleHover = false)}
-          onPointerDown={(event) => {
-            event.currentTarget.setPointerCapture(event.pointerId);
-            engine.beginDrag(event.clientY, event.timeStamp);
-          }}
-          onPointerMove={(event) => engine.moveDrag(event.clientY, event.timeStamp)}
-          onPointerUp={() => engine.endDrag()}
-          onPointerCancel={() => engine.endDrag()}
-          onDoubleClick={() => engine.toggle()}
-          onKeyDown={(event) => {
-            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-            event.preventDefault();
-            engine.step(event.key === "ArrowUp" ? 1 : -1);
-          }}
-        />
-      )}
-    </>
-  );
+  return <canvas className="line" ref={canvas} aria-hidden="true" />;
 }

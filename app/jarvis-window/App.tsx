@@ -1,8 +1,9 @@
 import gsap from "gsap";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
-import { ClaudeBand, ClaudePanel, type Snapshot } from "./ClaudePanel";
-import { Line, LineEngine, type Mood, type StrandItem } from "./Line";
+import { ClaudeWorkspace, type Snapshot } from "./ClaudePanel";
+import { Icon } from "./icons";
+import { VoiceLine, type Mood } from "./Line";
 
 type Pending = { command: string; level: "run" | "say-back" | "confirm"; options?: string[]; title?: string };
 type Reply = { say: string; source: string; tool?: string; pending?: Pending; ms: number; tag?: number };
@@ -30,6 +31,7 @@ type VoiceEvent = {
   stopped?: boolean;
 };
 type VoiceStatus = "off" | "loading" | "on" | "muted";
+type ThemeMode = "dark" | "light";
 
 declare global {
   interface Window {
@@ -44,9 +46,10 @@ declare global {
       deleteFact(id: number): Promise<void>;
       reminders(): Promise<Reminder[]>;
       deleteReminder(id: number): Promise<void>;
+      listProjects(): Promise<string[]>;
       warmUp(): Promise<boolean>;
       welcome(text: string): Promise<number | undefined>;
-      setTheme(mode: "dark" | "light"): Promise<void>;
+      setTheme(mode: ThemeMode): Promise<void>;
       setMuted(muted: boolean): Promise<void>;
       voiceAvailable(): Promise<"off" | "loading" | "ready">;
       health(): Promise<string[]>;
@@ -60,12 +63,11 @@ declare global {
   }
 }
 
-const HINTS = ["What time is it?", "Tell me a joke", "Google the weather in Tunis"];
 const GLYPHS = "abcdefghjkmnprstuvxyz0123456789";
 const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
 let nextId = 1;
 
-function savedMode(): "dark" | "light" {
+function savedMode(): ThemeMode {
   try {
     return localStorage.getItem("jarvis-mode") === "light" ? "light" : "dark";
   } catch {
@@ -73,14 +75,15 @@ function savedMode(): "dark" | "light" {
   }
 }
 
-function whenWas(time: number): string {
-  const minutes = Math.round((Date.now() - time) / 60000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  if (minutes < 1440) return `${Math.round(minutes / 60)} h ago`;
-  if (minutes < 2880) return "yesterday";
+const DAY = 86_400_000;
+function dayOf(time: number): string {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  if (time >= start.getTime()) return "Today";
+  if (time >= start.getTime() - DAY) return "Yesterday";
   return new Date(time).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
+const clock = (time: number) => new Date(time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
 const asMessages = (turns: Turn[]): Message[] => turns.map((turn) => ({ id: nextId++, from: turn.role === "user" ? "you" : "jarvis", text: turn.text, restored: true }));
 
@@ -169,131 +172,99 @@ function Boot({ steps, leaving }: { steps: Record<string, Step>; leaving: boolea
 }
 
 // A decision sits above the message box, so it can't scroll away while Claude waits on it.
-function Decision({ pending, onChoose, onSay }: { pending: Pending; onChoose(index: number, label: string): void; onSay(text: string): void }) {
+function Decision({ pending, fromClaude, onChoose, onSay }: { pending: Pending; fromClaude: boolean; onChoose(index: number, label: string): void; onSay(text: string): void }) {
   const danger = pending.level === "confirm";
   const options = pending.options;
   return (
-    <section className={`decision ${danger ? "danger" : ""}`} aria-label="Your decision is needed">
-      <h3>{pending.title ?? (danger ? "This one is dangerous. Run it?" : "Shall I run this?")}</h3>
+    <section className={`decision${danger ? " danger" : ""}`} aria-label="Your decision is needed">
+      <div className="top">
+        <Icon name={danger ? "shield" : fromClaude ? "claude" : "shield"} />
+        <h3>{pending.title ?? (danger ? "This one is dangerous. Run it?" : fromClaude ? "Claude wants to run a command" : "Shall I run this?")}</h3>
+      </div>
       {pending.command && <code>{pending.command}</code>}
-      <div className="decision-options">
+      <div className="options">
         {options ? options.map((option, index) => (
-          <button
-            key={option}
-            type="button"
-            className={danger && /^yes\b/i.test(option) ? "alarm" : ""}
-            onClick={() => onChoose(index, option)}
-          >
-            <kbd>{index + 1}</kbd>
-            <span>{option}</span>
+          <button key={option} type="button" className={`opt${index === 0 ? " go" : ""}`} onClick={() => onChoose(index, option)}>
+            {option}
           </button>
         )) : (
-          <button type="button" className={danger ? "alarm" : ""} onClick={() => onSay(danger ? "confirm" : "yes")}>
-            <kbd>1</kbd>
-            <span>{danger ? "Confirm" : "Go ahead"}</span>
-          </button>
+          <>
+            <button type="button" className="opt go" onClick={() => onSay(danger ? "confirm" : "yes")}>{danger ? "Run it" : "Go ahead"}</button>
+            <button type="button" className="opt" onClick={() => onSay("cancel")}>Cancel</button>
+          </>
         )}
       </div>
-      <button type="button" className="decision-cancel" onClick={() => onSay("cancel")}><kbd>Esc</kbd> Cancel</button>
     </section>
   );
 }
 
-// Earlier conversations sit above the current one. Scrolling up is how you get back to them.
-function Earlier({ chats, onOpen, onDeleted }: { chats: Chat[]; onOpen(id: number): void; onDeleted(): void }) {
+// Past conversations, grouped by day. Deleting asks once, in place.
+function Sidebar({ chats, current, onOpen, onNew, onDeleted }: { chats: Chat[]; current: number | null; onOpen(id: number): void; onNew(): void; onDeleted(): void }) {
   const [confirming, setConfirming] = useState<number | null>(null);
-  if (chats.length === 0) return null;
+  const groups: [string, Chat[]][] = [];
+  for (const chat of [...chats].sort((a, b) => b.updated - a.updated)) {
+    const day = dayOf(chat.updated);
+    const group = groups.find(([name]) => name === day);
+    if (group) group[1].push(chat);
+    else groups.push([day, [chat]]);
+  }
   return (
-    <ul className="earlier-list">
-      {chats.map((chat) => (
-        <li key={chat.id}>
-          {confirming === chat.id ? (
-            <div className="chat-confirm">
-              <span>Delete this for good?</span>
-              <button
-                type="button"
-                className="alarm"
-                onClick={() => {
-                  setConfirming(null);
-                  window.jarvis.deleteChat(chat.id).then(onDeleted);
-                }}
-              >
-                Delete
-              </button>
-              <button type="button" onClick={() => setConfirming(null)}>Keep</button>
+    <aside className="rail" aria-label="Conversations">
+      <div className="rail-head">
+        <button type="button" className="btn wide" onClick={onNew}><Icon name="plus" />New conversation</button>
+      </div>
+      <div className="rail-scroll">
+        {groups.length === 0 && <p className="empty-note">Your conversations will appear here.</p>}
+        {groups.map(([day, list]) => (
+          <div key={day}>
+            <div className="label">{day}</div>
+            <div className="group">
+              {list.map((chat) => confirming === chat.id ? (
+                <div key={chat.id} className="item confirm">
+                  <span className="t">Delete for good?</span>
+                  <button
+                    type="button"
+                    className="mini danger"
+                    onClick={() => {
+                      setConfirming(null);
+                      window.jarvis.deleteChat(chat.id).then(onDeleted);
+                    }}
+                  >
+                    Delete
+                  </button>
+                  <button type="button" className="mini" onClick={() => setConfirming(null)}>Keep</button>
+                </div>
+              ) : (
+                <div key={chat.id} className="item" role="button" tabIndex={0} aria-current={chat.id === current} title={chat.title}
+                  onClick={() => onOpen(chat.id)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    onOpen(chat.id);
+                  }}
+                >
+                  <Icon name="chat" />
+                  <span className="t">{chat.title}</span>
+                  {day === "Today" && <span className="m">{clock(chat.updated)}</span>}
+                  <button
+                    type="button"
+                    className="x"
+                    aria-label={`Delete ${chat.title}`}
+                    title="Delete"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setConfirming(chat.id);
+                    }}
+                  >
+                    <Icon name="trash" />
+                  </button>
+                </div>
+              ))}
             </div>
-          ) : (
-            <>
-              <button type="button" className="chat-open" onClick={() => onOpen(chat.id)}>
-                <span className="chat-title">{chat.title}</span>
-                <span className="chat-meta">{whenWas(chat.updated)} · {chat.turns} {chat.turns === 1 ? "line" : "lines"}</span>
-              </button>
-              <button type="button" className="row-delete" aria-label={`Delete ${chat.title}`} title="Delete" onClick={() => setConfirming(chat.id)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg>
-              </button>
-            </>
-          )}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-// Timers and reminders peel off the top of the line and shrink as their time runs out.
-function reminderLabel(item: Reminder, now: number): string {
-  const left = Math.max(0, Math.ceil((item.due - now) / 1000));
-  if (left >= 86400) return new Date(item.due).toLocaleDateString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" });
-  if (left >= 3600) return item.kind === "timer" ? `${Math.floor(left / 3600)}:${String(Math.floor(left / 60) % 60).padStart(2, "0")}:${String(left % 60).padStart(2, "0")}` : new Date(item.due).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  return `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
-}
-function reminderTitle(item: Reminder): string {
-  if (item.kind === "timer") return `${item.text} timer`;
-  if (item.kind === "alarm") return "Alarm";
-  return item.text || "Reminder";
-}
-
-function Timers({ engine }: { engine: LineEngine }) {
-  const [items, setItems] = useState<Reminder[]>([]);
-  const [now, setNow] = useState(Date.now());
-  const firstSeen = useRef(new Map<number, number>());
-  useEffect(() => {
-    let alive = true;
-    const tick = () => {
-      setNow(Date.now());
-      window.jarvis.reminders().then((list) => alive && setItems(list.slice(0, 4)));
-    };
-    tick();
-    const interval = window.setInterval(tick, 1000);
-    return () => {
-      alive = false;
-      window.clearInterval(interval);
-    };
-  }, []);
-  useEffect(() => {
-    const strands: StrandItem[] = items.map((item) => {
-      if (!firstSeen.current.has(item.id)) firstSeen.current.set(item.id, now);
-      const start = firstSeen.current.get(item.id)!;
-      const frac = item.due > start ? (item.due - now) / (item.due - start) : 0;
-      return { id: `reminder-${item.id}`, kind: "timer", title: reminderTitle(item), active: false, working: false, asking: false, frac };
-    });
-    engine.sync("timers", strands);
-  }, [engine, items, now]);
-  return (
-    <div className="band">
-      {items.map((item) => (
-        <div
-          key={item.id}
-          ref={(element) => engine.label(`reminder-${item.id}`, element)}
-          className="label timer"
-          title={reminderTitle(item)}
-          onPointerEnter={() => (engine.hovered = `reminder-${item.id}`)}
-          onPointerLeave={() => (engine.hovered = null)}
-        >
-          <span className="label-main">{reminderLabel(item, now)}</span>
-          <button type="button" className="label-x" aria-label={`Cancel: ${reminderTitle(item)}`} onClick={() => window.jarvis.deleteReminder(item.id).then(() => setItems((list) => list.filter((other) => other.id !== item.id)))}>×</button>
-        </div>
-      ))}
-    </div>
+          </div>
+        ))}
+      </div>
+    </aside>
   );
 }
 
@@ -301,7 +272,7 @@ function Setting({ title, about, children }: { title: string; about: string; chi
   return (
     <div className="setting">
       <div>
-        <h3>{title}</h3>
+        <b>{title}</b>
         <p>{about}</p>
       </div>
       {children}
@@ -309,80 +280,135 @@ function Setting({ title, about, children }: { title: string; about: string; chi
   );
 }
 
-function Preferences({ open, mode, setMode, autostart, setAutostart, bypass }: {
-  open: boolean;
-  mode: "dark" | "light";
-  setMode(mode: "dark" | "light"): void;
+function Settings({ mode, setMode, autostart, setAutostart, voice, setMuted, bypass, onClose }: {
+  mode: ThemeMode;
+  setMode(mode: ThemeMode): void;
   autostart: boolean;
   setAutostart(on: boolean): void;
+  voice: VoiceStatus;
+  setMuted(muted: boolean): void;
   bypass: boolean;
+  onClose(): void;
 }) {
   const [warning, setWarning] = useState(false);
   const [facts, setFacts] = useState<Fact[]>([]);
   useEffect(() => {
-    if (open) window.jarvis.listFacts().then(setFacts);
-    setWarning(false);
-  }, [open]);
+    window.jarvis.listFacts().then(setFacts);
+  }, []);
+  const micReady = voice === "on" || voice === "muted";
   return (
-    <div className="preferences" hidden={!open}>
-      <div className="col">
-      <h2>Jarvis</h2>
-      <Setting title="Appearance" about="Dark, or a warm champagne.">
-        <div className="segments" role="group" aria-label="Appearance">
-          {(["dark", "light"] as const).map((name) => (
-            <button key={name} type="button" aria-pressed={mode === name} onClick={() => setMode(name)}>{name === "dark" ? "Dark" : "Light"}</button>
-          ))}
-        </div>
-      </Setting>
-      <Setting title="Start with your computer" about="Opens Jarvis when you log in.">
-        <div className="segments" role="group" aria-label="Start with your computer">
-          {[true, false].map((enabled) => (
-            <button key={String(enabled)} type="button" aria-pressed={autostart === enabled} onClick={() => window.jarvis.setAutostart(enabled).then(setAutostart)}>{enabled ? "On" : "Off"}</button>
-          ))}
-        </div>
-      </Setting>
+    <div className="scrim" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="sheet" role="dialog" aria-modal="true" aria-label="Settings">
+        <header>
+          <h2>Settings</h2>
+          <button type="button" className="tb-btn sq" aria-label="Close settings" onClick={onClose}><Icon name="close" /></button>
+        </header>
+        <section>
+          <h3>Jarvis</h3>
+          <Setting title="Appearance" about="Dark, or a warm champagne.">
+            <div className="seg" role="group" aria-label="Appearance">
+              {(["dark", "light"] as const).map((name) => (
+                <button key={name} type="button" aria-pressed={mode === name} onClick={() => setMode(name)}>{name === "dark" ? "Dark" : "Champagne"}</button>
+              ))}
+            </div>
+          </Setting>
+          <Setting title="Start with your computer" about="Opens Jarvis when you log in.">
+            <div className="seg" role="group" aria-label="Start with your computer">
+              {[true, false].map((enabled) => (
+                <button key={String(enabled)} type="button" aria-pressed={autostart === enabled} onClick={() => window.jarvis.setAutostart(enabled).then(setAutostart)}>{enabled ? "On" : "Off"}</button>
+              ))}
+            </div>
+          </Setting>
+          <Setting
+            title="Microphone"
+            about={voice === "on" ? 'Jarvis wakes when you say "Hey Jarvis".' : voice === "muted" ? "Muted. Jarvis only reads what you type." : voice === "loading" ? "The voice is still loading." : "The voice isn't running."}
+          >
+            <div className="seg" role="group" aria-label="Microphone">
+              <button type="button" disabled={!micReady} aria-pressed={voice === "on"} onClick={() => setMuted(false)}>On</button>
+              <button type="button" disabled={!micReady} aria-pressed={voice === "muted"} onClick={() => setMuted(true)}>Muted</button>
+            </div>
+          </Setting>
+        </section>
+        <section>
+          <h3>Claude</h3>
+          <Setting title="Permissions" about={bypass ? "Bypass is on. Claude runs commands without asking." : "Claude asks before it runs commands or changes files."}>
+            <div className="seg" role="group" aria-label="Claude permissions">
+              <button type="button" aria-pressed={!bypass} onClick={() => { setWarning(false); window.claude.setBypass(false); }}>Ask me</button>
+              <button type="button" className="danger-on" aria-pressed={bypass} onClick={() => !bypass && setWarning(true)}>Bypass</button>
+            </div>
+          </Setting>
+          {warning && (
+            <div className="warning" role="alert">
+              <b>Let Claude act without asking?</b>
+              <p>
+                Claude will run any command and change any file without checking with you. This computer has passwordless sudo, so
+                a mistake, or a malicious instruction hidden in a web page or file Claude reads, could change or delete anything on
+                it, with no prompt to stop it.
+              </p>
+              <div>
+                <button type="button" className="btn danger" onClick={() => { setWarning(false); window.claude.setBypass(true); }}>Turn on bypass</button>
+                <button type="button" className="btn" onClick={() => setWarning(false)}>Keep asking me</button>
+              </div>
+            </div>
+          )}
+        </section>
+        <section>
+          <h3>Memory</h3>
+          <p className="about">What Jarvis has picked up about you, or was told to remember. It stays on this computer. Deleting removes it for good.</p>
+          {facts.length === 0 && <p className="about">Nothing yet.</p>}
+          <ul className="facts">
+            {facts.map((fact) => (
+              <li key={fact.id}>
+                <span>{fact.text}</span>
+                <button
+                  type="button"
+                  aria-label={`Forget: ${fact.text}`}
+                  title="Forget this"
+                  onClick={() => window.jarvis.deleteFact(fact.id).then(() => window.jarvis.listFacts()).then(setFacts)}
+                >
+                  <Icon name="trash" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      </div>
+    </div>
+  );
+}
 
-      <h2>Claude</h2>
-      <Setting title="Permissions" about={bypass ? "Bypass is on. Claude runs commands without asking." : "Claude asks before running commands or changing files."}>
-        <div className="segments" role="group" aria-label="Claude permissions">
-          <button type="button" aria-pressed={!bypass} onClick={() => { setWarning(false); window.claude.setBypass(false); }}>Ask me</button>
-          <button type="button" className={bypass ? "danger-on" : ""} aria-pressed={bypass} onClick={() => !bypass && setWarning(true)}>Bypass</button>
-        </div>
-      </Setting>
-      {warning && (
-        <div className="warning" role="alert">
-          <h3>Let Claude act without asking?</h3>
-          <p>
-            Claude will run any command and change any file without checking with you. This computer has passwordless sudo, so
-            a mistake, or a malicious instruction hidden in a web page or file Claude reads, could change or delete anything on
-            it, with no prompt to stop it.
-          </p>
-          <div>
-            <button type="button" className="alarm" onClick={() => { setWarning(false); window.claude.setBypass(true); }}>Turn on bypass</button>
-            <button type="button" onClick={() => setWarning(false)}>Keep asking me</button>
-          </div>
-        </div>
-      )}
-
-      <h2>Memory</h2>
-      <p className="pref-about">What Jarvis has picked up about you, or was told to remember. It stays on this computer. Deleting removes it for good.</p>
-      {facts.length === 0 && <p className="pref-about">Nothing yet.</p>}
-      <ul className="facts">
-        {facts.map((fact) => (
-          <li key={fact.id}>
-            <span>{fact.text}</span>
-            <button
-              type="button"
-              className="row-delete"
-              aria-label={`Forget: ${fact.text}`}
-              title="Forget this"
-              onClick={() => window.jarvis.deleteFact(fact.id).then(() => window.jarvis.listFacts()).then(setFacts)}
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></svg>
-            </button>
-          </li>
+// With no project open, the Claude button lists the folders in the projects folder.
+function ProjectMenu({ onPick, onClose }: { onPick(name: string): void; onClose(): void }) {
+  const [projects, setProjects] = useState<string[] | null>(null);
+  useEffect(() => {
+    window.jarvis.listProjects().then(setProjects, () => setProjects([]));
+    const away = (event: PointerEvent) => {
+      if (!(event.target as HTMLElement).closest(".pop, .open-claude")) onClose();
+    };
+    const esc = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    window.addEventListener("pointerdown", away);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("pointerdown", away);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [onClose]);
+  return (
+    <div className="pop project-pop" role="menu" aria-label="Open a project">
+      <div className="pop-head">
+        <b>Open a project</b>
+        <span>Or say "let's start coding" and its name.</span>
+      </div>
+      <hr />
+      <div className="pop-list">
+        {projects === null && <p className="pop-note">Looking…</p>}
+        {projects?.length === 0 && <p className="pop-note">No folders in ~/Documents/Projects yet.</p>}
+        {projects?.map((name) => (
+          <button key={name} type="button" role="menuitem" onClick={() => onPick(name)}>
+            <Icon name="folder" />
+            <span>{name}</span>
+          </button>
         ))}
-      </ul>
       </div>
     </div>
   );
@@ -398,61 +424,50 @@ export function App() {
   // Called once the voice is ready, or known not to be coming.
   const voiceUp = useRef<(ready: boolean) => void>(() => {});
   const [mood, setMood] = useState<Mood>("idle");
-  const [pulse, setPulse] = useState(0);
-  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [claudeAsking, setClaudeAsking] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [chats, setChats] = useState<Chat[]>([]);
-  const [scrolledBack, setScrolledBack] = useState(false);
-  const [engine] = useState(() => new LineEngine());
+  const [currentChat, setCurrentChat] = useState<number | null>(null);
   const [mode, setMode] = useState(savedMode);
   const [pending, setPending] = useState<Pending | null>(null);
   const [voice, setVoice] = useState<VoiceStatus>("off");
   const voiceRef = useRef<VoiceStatus>("off");
   const [autostart, setAutostart] = useState(false);
   const [claude, setClaude] = useState<Snapshot | null>(null);
+  const [workOpen, setWorkOpen] = useState(true);
+  const [railOpen, setRailOpen] = useState(false);
+  const [projectMenu, setProjectMenu] = useState(false);
   const claudeNow = useRef<Snapshot | null>(null);
   claudeNow.current = claude;
-  const current = useRef<HTMLDivElement>(null);
-  const box = useRef<HTMLFormElement>(null);
-  const scroller = useRef<HTMLDivElement>(null);
+  const win = useRef<HTMLDivElement>(null);
+  const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const stopSpeaking = useRef(0);
 
-  useEffect(() => {
+  // A layout effect, so the theme is in place before the line reads its colors.
+  useLayoutEffect(() => {
     document.documentElement.dataset.mode = mode;
     window.jarvis.setTheme(mode);
-    engine.readTokens();
     try {
       localStorage.setItem("jarvis-mode", mode);
     } catch {
       // The choice just won't be remembered.
     }
-  }, [engine, mode]);
+  }, [mode]);
 
-  // The conversation is pinned to the line, so 0 is now and negative is back in time.
   const scrollDown = useCallback(() => {
-    if (scroller.current) scroller.current.scrollTop = 0;
+    if (log.current) log.current.scrollTop = log.current.scrollHeight;
   }, []);
-  useLayoutEffect(scrollDown, [messages, prefsOpen, pending, busy, scrollDown]);
-
-  useEffect(() => engine.watchBox(box.current!), [engine]);
-  const watchDecision = useRef<() => void>(() => {});
-  const decisionSlot = useCallback((element: HTMLDivElement | null) => {
-    watchDecision.current();
-    watchDecision.current = engine.watchDecision(element);
-  }, [engine]);
-  useEffect(() => {
-    engine.prefs = prefsOpen;
-  }, [engine, prefsOpen]);
+  useLayoutEffect(scrollDown, [messages, pending, busy, scrollDown]);
 
   // The box grows with what's written, up to a limit, then scrolls.
   useLayoutEffect(() => {
     const box = input.current;
     if (!box) return;
     box.style.height = "auto";
-    box.style.height = `${Math.min(box.scrollHeight, 200)}px`;
-  }, [draft, prefsOpen]);
+    box.style.height = `${Math.min(box.scrollHeight, 160)}px`;
+  }, [draft]);
 
   // A spoken message finished, or was cut off: it shows its full text from now on.
   const settle = useCallback((which: (message: Message) => boolean) => {
@@ -476,12 +491,8 @@ export function App() {
     }
     setPending(withPending ?? null);
     setClaudeAsking(fromClaude && Boolean(withPending));
-    // A question has to be seen, so it closes Preferences if they're open.
-    if (withPending) setPrefsOpen(false);
-    const sessions = claudeNow.current?.sessions ?? [];
-    const busyId = sessions.find((session) => session.working)?.id ?? claudeNow.current?.active ?? undefined;
-    if (tool === "ask_claude") engine.packet(busyId, true);
-    if (fromClaude) engine.packet(busyId, false);
+    // A question has to be seen, so it closes Settings if they're open.
+    if (withPending) setSettingsOpen(false);
     // With a voice, the line follows the real sound. Without one, it estimates.
     if (tag !== undefined || voiceRef.current === "on" || voiceRef.current === "muted" || voiceRef.current === "loading") return;
     setMood("speaking");
@@ -490,7 +501,7 @@ export function App() {
       () => setMood("idle"),
       calm ? 150 : Math.min(3400, 900 + text.length * 34),
     );
-  }, [engine, settle]);
+  }, [settle]);
 
   const updateVoice = useCallback((status: VoiceStatus) => {
     voiceRef.current = status;
@@ -554,7 +565,7 @@ export function App() {
         case "chat-reset":
           setMessages([]);
           setPending(null);
-          setPrefsOpen(false);
+          setSettingsOpen(false);
           break;
         case "speaking":
           setMood(event.active ? "speaking" : "idle");
@@ -562,17 +573,17 @@ export function App() {
           else if (!event.active && event.tag !== undefined) settle((message) => message.tag === event.tag);
           break;
         case "show-claude":
-          if (engine.snap === "low") engine.setSnap("mid");
+          setWorkOpen(true);
           break;
         case "hide-claude":
-          engine.setSnap("low");
+          setWorkOpen(false);
           break;
         case "settled":
           setPending(null);
           break;
       }
     });
-  }, [engine, speak, settle, updateVoice]);
+  }, [speak, settle, updateVoice]);
 
   useEffect(() => {
     window.jarvis.getAutostart().then(setAutostart);
@@ -580,13 +591,15 @@ export function App() {
     return window.claude.onChange(setClaude);
   }, []);
 
-  // A newly opened project always gets room below the line.
+  // A newly opened project always shows Claude.
   const openProject = claude?.project ?? null;
   useEffect(() => {
-    engine.project = Boolean(openProject);
-    if (openProject && engine.snap === "low") engine.setSnap("mid");
+    if (openProject) {
+      setWorkOpen(true);
+      setProjectMenu(false);
+    }
     setChoosing(false);
-  }, [engine, openProject]);
+  }, [openProject]);
 
   // Esc leaves the session view, instead of stopping Claude behind it.
   useEffect(() => {
@@ -600,22 +613,10 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [choosing, pending]);
 
-  // Alt+arrows move the line from anywhere, even from inside a terminal.
-  useEffect(() => {
-    if (!openProject) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
-      event.preventDefault();
-      event.stopPropagation();
-      engine.step(event.key === "ArrowUp" ? 1 : -1);
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [engine, openProject]);
-
   const refreshChats = useCallback(() => {
     window.jarvis.listChats().then((list) => {
-      setChats(list.chats.filter((chat) => chat.id !== list.current).reverse());
+      setChats(list.chats);
+      setCurrentChat(list.current);
     });
   }, []);
   useEffect(refreshChats, [refreshChats, messages.length]);
@@ -659,7 +660,7 @@ export function App() {
       if (!said || busy) return;
       setBusy(true);
       setPending(null);
-      setPrefsOpen(false);
+      setSettingsOpen(false);
       setMood("thinking");
       setMessages((list) => [...list, { id: nextId++, from: "you", text: said }]);
       try {
@@ -691,7 +692,7 @@ export function App() {
     if (!pending) return;
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest?.(".terminal-host")) return;
+      if (target?.closest?.(".terminal-host, .term-box")) return;
       if (event.key === "Escape") {
         event.preventDefault();
         send("cancel");
@@ -710,6 +711,73 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [pending, draft, send, choose]);
 
+  const openChat = useCallback((id: number) => {
+    window.jarvis.openChat(id).then((turns) => {
+      setMessages(asMessages(turns));
+      setPending(null);
+      setRailOpen(false);
+      refreshChats();
+      input.current?.focus();
+    });
+  }, [refreshChats]);
+
+  const newChat = useCallback(() => {
+    window.jarvis.newChat().then(() => {
+      setMessages([]);
+      setPending(null);
+      setRailOpen(false);
+      refreshChats();
+      input.current?.focus();
+    });
+  }, [refreshChats]);
+
+  const setMuted = useCallback((muted: boolean) => {
+    updateVoice(muted ? "muted" : "on");
+    window.jarvis.setMuted(muted);
+  }, [updateVoice]);
+
+  // Ctrl+N, Ctrl+J and Ctrl+, work without being shown anywhere.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "n" && !event.shiftKey) {
+        event.preventDefault();
+        newChat();
+      } else if (key === "j" && claudeNow.current?.project) {
+        event.preventDefault();
+        setWorkOpen((open) => !open);
+      } else if (key === ",") {
+        event.preventDefault();
+        setSettingsOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [newChat]);
+
+  // Drag the edge to size Claude's side.
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const handle = event.currentTarget;
+    const frame = win.current;
+    if (!frame) return;
+    handle.setPointerCapture(event.pointerId);
+    handle.classList.add("drag");
+    const rail = frame.querySelector<HTMLElement>(".rail")?.offsetWidth ?? 0;
+    const move = (moved: PointerEvent) => {
+      const box = frame.getBoundingClientRect();
+      const width = Math.max(340, Math.min(box.width - rail - 380, box.right - moved.clientX));
+      frame.style.setProperty("--work-w", `${width}px`);
+    };
+    const up = () => {
+      handle.classList.remove("drag");
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  };
+
   const submit = () => {
     if (busy || !draft.trim()) return;
     const value = draft;
@@ -718,176 +786,158 @@ export function App() {
     send(value);
   };
 
-  const openChat = useCallback((id: number) => {
-    window.jarvis.openChat(id).then((turns) => {
-      setMessages(asMessages(turns));
-      setPending(null);
-      setPrefsOpen(false);
-      scrollDown();
-      input.current?.focus();
-    });
-  }, [scrollDown]);
-
-  const newChat = useCallback(() => {
-    window.jarvis.newChat().then(() => {
-      setMessages([]);
-      setPending(null);
-      setPrefsOpen(false);
-      scrollDown();
-      refreshChats();
-      input.current?.focus();
-    });
-  }, [refreshChats, scrollDown]);
-
+  const chatTitle = chats.find((chat) => chat.id === currentChat)?.title ?? (messages.some((message) => message.from === "you") ? "Conversation" : "New conversation");
+  const showWork = Boolean(openProject && claude && workOpen);
+  const askingId = pending && claudeAsking && claude ? (claude.sessions.find((session) => session.working)?.id ?? claude.active) : null;
+  const hints = openProject
+    ? ["What's Claude doing?", "Did the tests pass?", "How much Claude do I have left?", "Close the project"]
+    : ["What's the weather in Tunis?", "Set a timer for 10 minutes", "Let's start coding"];
+  const showHints = !booting && !pending && !busy && messages.filter((message) => message.from === "you").length === 0;
   const lastJarvis = messages.map((message) => message.from).lastIndexOf("jarvis");
-  const asking = Boolean(pending);
+
   return (
-    <div className="shell" data-project={openProject ? "open" : "closed"} data-room="wide">
-      <header className="appbar">
-        <b>Jarvis</b>
-        {chats.length > 0 && !prefsOpen && (
+    <div className="win" ref={win} data-work={showWork ? "on" : "off"} data-rail={railOpen ? "open" : "closed"}>
+      <header className="titlebar">
+        <button type="button" className="tb-btn menu-btn" aria-label="Conversations" title="Conversations" onClick={() => setRailOpen((open) => !open)}><Icon name="menu" /></button>
+        <div className="mark"><i />JARVIS</div>
+        <div className="grow" />
+        <div className="tb-anchor">
           <button
             type="button"
-            className="earlier"
-            onClick={() => scroller.current?.scrollTo({ top: scrolledBack ? 0 : -((current.current?.offsetHeight ?? 0) - 60), behavior: calm ? "auto" : "smooth" })}
+            className="tb-btn open-claude"
+            aria-pressed={showWork}
+            aria-label={openProject ? (workOpen ? "Hide Claude" : "Show Claude") : "Open a project"}
+            title={openProject ? (workOpen ? "Hide Claude" : "Show Claude") : "Open a project"}
+            onClick={() => (openProject ? setWorkOpen((open) => !open) : setProjectMenu((open) => !open))}
           >
-            {scrolledBack ? "Back to now" : "Earlier"}
+            <Icon name="claude" />
           </button>
-        )}
-        <button type="button" aria-label="New conversation" title="New conversation" onClick={newChat}>
-          <svg className="big" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-        </button>
-        <button type="button" aria-label="Preferences" title="Preferences" aria-pressed={prefsOpen} onClick={() => setPrefsOpen((value) => !value)}>
-          <svg className="big" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
-          </svg>
-        </button>
-        <button type="button" aria-label="Minimize" title="Minimize" onClick={() => window.jarvis.minimize()}>
-          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6h10" stroke="currentColor" strokeWidth="1.3" /></svg>
-        </button>
-        <button type="button" aria-label="Maximize" title="Maximize" onClick={() => window.jarvis.toggleMaximize()}>
-          <svg viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1.3" /></svg>
-        </button>
-        <button type="button" className="quit" aria-label="Close" title="Close" onClick={() => window.jarvis.close()}>
-          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.3" /></svg>
-        </button>
+          {projectMenu && !openProject && (
+            <ProjectMenu
+              onClose={() => setProjectMenu(false)}
+              onPick={(name) => {
+                setProjectMenu(false);
+                send(`Let's start coding ${name}`);
+              }}
+            />
+          )}
+        </div>
+        <button type="button" className="tb-btn" aria-label="Settings" title="Settings" aria-pressed={settingsOpen} onClick={() => setSettingsOpen((open) => !open)}><Icon name="gear" /></button>
+        <button type="button" className="tb-btn" aria-label="Minimize" title="Minimize" onClick={() => window.jarvis.minimize()}><Icon name="min" /></button>
+        <button type="button" className="tb-btn" aria-label="Maximize" title="Maximize" onClick={() => window.jarvis.toggleMaximize()}><Icon name="max" /></button>
+        <button type="button" className="tb-btn quit" aria-label="Close" title="Close" onClick={() => window.jarvis.close()}><Icon name="close" /></button>
       </header>
 
-      <section className="above" aria-label="Conversation with Jarvis">
-        <div className="scroller" ref={scroller} hidden={prefsOpen} onScroll={(event) => setScrolledBack(event.currentTarget.scrollTop < -40)}>
-          <div className="log col">
-            <Earlier chats={chats} onOpen={openChat} onDeleted={refreshChats} />
-            <div className="now-chat" ref={current} role="log" aria-live="polite">
-              {messages.map((message, index) => (
-                <div
-                  key={message.id}
-                  className={`message ${message.from}${index === lastJarvis ? " latest" : ""}${index === messages.length - 1 ? " now" : ""}${index === lastJarvis && (message.final ?? message.text).length <= 180 ? " big" : ""}`}
-                >
-                  {message.from === "jarvis" && (message.viaClaude || message.fromClaude) && !(message.live && !message.parts?.length) && <small>{message.viaClaude ? "Jarvis, asking Claude" : "From Claude"}</small>}
-                  {message.live ? <Voiced parts={message.parts ?? []} /> : message.from === "jarvis" && !message.restored && !message.settled ? <Spoken text={message.text} /> : <p>{message.text}</p>}
-                </div>
-              ))}
-              {busy && <span className="sr-only" role="status">Jarvis is thinking</span>}
-            </div>
+      <Sidebar chats={chats} current={currentChat} onOpen={openChat} onNew={newChat} onDeleted={refreshChats} />
+
+      <main className="chat" aria-label="Conversation with Jarvis" onPointerDown={() => railOpen && setRailOpen(false)}>
+        <div className="chat-head"><div className="col"><h1>{chatTitle}</h1></div></div>
+        <div className="log" ref={log}>
+          <div className="col" role="log" aria-live="polite">
+            {messages.map((message, index) => (
+              <div key={message.id} className={`msg ${message.from}`}>
+                {message.from === "jarvis" && (message.viaClaude || message.fromClaude) && !(message.live && !message.parts?.length) && (
+                  <span className="who" title={message.viaClaude ? "Jarvis asked Claude" : "From Claude"}><Icon name="claude" /></span>
+                )}
+                {message.live ? (
+                  <Voiced parts={message.parts ?? []} />
+                ) : message.from === "jarvis" && !message.restored && !message.settled && index === lastJarvis ? (
+                  <Spoken text={message.text} />
+                ) : (
+                  <p>{message.text}</p>
+                )}
+              </div>
+            ))}
+            {busy && !booting && <span className="sr-only" role="status">Jarvis is thinking</span>}
           </div>
         </div>
-        {!prefsOpen && pending && (
-          <div className="col decision-slot" ref={decisionSlot}>
-            <Decision pending={pending} onChoose={choose} onSay={send} />
+        {pending && !settingsOpen && (
+          <div className="col decision-slot">
+            <Decision pending={pending} fromClaude={claudeAsking} onChoose={choose} onSay={send} />
           </div>
         )}
-        <Preferences open={prefsOpen} mode={mode} setMode={setMode} autostart={autostart} setAutostart={setAutostart} bypass={Boolean(claude?.bypass)} />
-      </section>
-
-      {openProject && claude && (
-        <div className="below">
-          <ClaudePanel snap={claude} mode={mode} asking={asking} choosing={choosing} onChosen={() => setChoosing(false)} />
-        </div>
-      )}
-
-      <Line engine={engine} mood={mood} pulse={pulse} movable={Boolean(openProject) && !prefsOpen} />
-      {openProject && claude && (
-        <ClaudeBand
-          snap={claude}
-          engine={engine}
-          asking={asking && claudeAsking}
-          choosing={choosing}
-          onToggleChoosing={() => {
-            if (engine.snap === "low") engine.setSnap("mid");
-            setChoosing((value) => !value);
-            input.current?.focus();
-          }}
-        />
-      )}
-      <Timers engine={engine} />
-
-      <form
-        ref={box}
-        className="ask"
-        onSubmit={(event) => {
-          event.preventDefault();
-          submit();
-        }}
-      >
-        <button
-          className="mic"
-          type="button"
-          disabled={voice === "off" || voice === "loading"}
-          aria-pressed={voice === "muted"}
-          aria-label={voice === "muted" ? "Turn microphone on" : "Mute microphone"}
-          title={voice === "muted" ? "Microphone is off. Click to turn it on." : "Microphone is on. Click to mute."}
-          onClick={() => {
-            const mute = voice !== "muted";
-            updateVoice(mute ? "muted" : "on");
-            window.jarvis.setMuted(mute);
-          }}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden="true">
-            <rect x="9" y="3" width="6" height="11" rx="3" />
-            <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-            {voice === "muted" && <path d="M4 4l16 16" />}
-          </svg>
-        </button>
-        <textarea
-          ref={input}
-          rows={1}
-          value={draft}
-          autoComplete="off"
-          placeholder={voice === "on" ? 'Say "Hey Jarvis" or type' : voice === "loading" ? "Voice is loading. You can type" : voice === "muted" ? "Microphone off. Type to Jarvis" : "Type to Jarvis"}
-          aria-label="Message to Jarvis"
-          onChange={(event) => {
-            setDraft(event.target.value);
-            setPulse((value) => value + 1);
-            setMood((now) => (now === "idle" || now === "listening" ? (event.target.value ? "listening" : "idle") : now));
-          }}
-          onKeyDown={(event) => {
-            // Enter sends and Shift+Enter starts a new line. Enter also has to wait while
-            // an accent or other composed character is being typed.
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+        {showHints && (
+          <div className="col hints">
+            {hints.map((hint) => (
+              <button key={hint} type="button" className="chip" onClick={() => send(hint)}>{hint}</button>
+            ))}
+          </div>
+        )}
+        <div className="band">
+          <VoiceLine mood={mood} asking={Boolean(pending)} mode={mode} />
+          <form
+            className="box col"
+            onSubmit={(event) => {
               event.preventDefault();
               submit();
-            }
-          }}
+            }}
+          >
+            <button
+              className="round mic"
+              type="button"
+              disabled={voice === "off" || voice === "loading"}
+              aria-pressed={voice === "muted"}
+              aria-label={voice === "muted" ? "Turn microphone on" : "Mute microphone"}
+              title={voice === "muted" ? "Microphone is off. Click to turn it on." : voice === "on" ? "Microphone is on. Click to mute." : "The voice isn't ready."}
+              onClick={() => setMuted(voice !== "muted")}
+            >
+              <Icon name={voice === "muted" ? "micOff" : "mic"} />
+            </button>
+            <textarea
+              ref={input}
+              rows={1}
+              value={draft}
+              autoComplete="off"
+              placeholder={voice === "on" ? 'Say "Hey Jarvis" or type' : voice === "loading" ? "Voice is loading. You can type" : voice === "muted" ? "Microphone off. Type to Jarvis" : "Type to Jarvis"}
+              aria-label="Message to Jarvis"
+              onChange={(event) => {
+                setDraft(event.target.value);
+                setMood((now) => (now === "idle" || now === "listening" ? (event.target.value ? "listening" : "idle") : now));
+              }}
+              onKeyDown={(event) => {
+                // Enter sends and Shift+Enter starts a new line. Enter also has to wait while
+                // an accent or other composed character is being typed.
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+            />
+            <button className="round send" type="submit" disabled={busy || !draft.trim()} aria-label="Send" title="Send">
+              <Icon name="up" />
+            </button>
+          </form>
+        </div>
+      </main>
+
+      {openProject && claude && (
+        <section className="work" aria-label="Claude" hidden={!showWork}>
+          <div className="resizer" aria-hidden="true" onPointerDown={startResize} />
+          <ClaudeWorkspace
+            snap={claude}
+            mode={mode}
+            askingId={askingId}
+            choosing={choosing}
+            setChoosing={setChoosing}
+            onHide={() => setWorkOpen(false)}
+          />
+        </section>
+      )}
+
+      {settingsOpen && (
+        <Settings
+          mode={mode}
+          setMode={setMode}
+          autostart={autostart}
+          setAutostart={setAutostart}
+          voice={voice}
+          setMuted={setMuted}
+          bypass={Boolean(claude?.bypass)}
+          onClose={() => setSettingsOpen(false)}
         />
-        <button className="send" type="submit" disabled={busy || !draft.trim()} aria-label="Send" title="Send (Enter). Shift+Enter starts a new line.">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M12 19V5M6 11l6-6 6 6" />
-          </svg>
-        </button>
-      </form>
+      )}
 
       {booting && <Boot steps={steps} leaving={leaving} />}
-
-      {messages.length <= 1 && !pending && !openProject && !prefsOpen && (
-        <div className="hints">
-          {HINTS.map((hint) => (
-            <button key={hint} type="button" onClick={() => send(hint)}>
-              {hint}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
