@@ -1,9 +1,9 @@
 // Jarvis himself: one glowing line, drawn on the top edge of the message box. It shows what he is
-// doing from the corner of your eye: breathing while idle, moving while he listens, a pulse
-// travelling along it while he thinks, a waveform while he speaks, and amber while he waits on you.
+// doing from the corner of your eye: breathing while idle, a pulse travelling along it while he
+// thinks, a waveform while he speaks, and amber while he waits on you. It never moves for you.
 import { useEffect, useRef } from "react";
 
-export type Mood = "idle" | "listening" | "thinking" | "speaking";
+export type Mood = "idle" | "thinking" | "speaking";
 
 const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -45,10 +45,6 @@ function draw(canvas: HTMLCanvasElement, mood: Mood, asking: boolean, colors: Co
     amp = h * 0.06 * (0.6 + 0.4 * Math.sin(t * 3));
     freq = 0.012;
     speed = 1.4;
-  } else if (mood === "listening") {
-    amp = h * 0.26;
-    freq = 0.045;
-    speed = 7;
   } else if (mood === "speaking") {
     amp = h * 0.34;
     freq = 0.028;

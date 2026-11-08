@@ -542,7 +542,7 @@ export function App() {
           updateVoice("loading");
           break;
         case "wake":
-          setMood("listening");
+          // The line only moves for Jarvis, not while you talk.
           break;
         case "heard":
           if (event.text) {
@@ -782,7 +782,6 @@ export function App() {
     if (busy || !draft.trim()) return;
     const value = draft;
     setDraft("");
-    setMood((now) => (now === "listening" ? "idle" : now));
     send(value);
   };
 
@@ -892,7 +891,6 @@ export function App() {
               aria-label="Message to Jarvis"
               onChange={(event) => {
                 setDraft(event.target.value);
-                setMood((now) => (now === "idle" || now === "listening" ? (event.target.value ? "listening" : "idle") : now));
               }}
               onKeyDown={(event) => {
                 // Enter sends and Shift+Enter starts a new line. Enter also has to wait while
