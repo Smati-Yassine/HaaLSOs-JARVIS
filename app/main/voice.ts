@@ -15,12 +15,37 @@ export type VoiceEvent =
   | { type: "error"; message: string; fatal?: boolean }
   | { type: "gone" };
 
-// Long terminal output belongs in the chat, not read aloud.
-const MAX_SPOKEN = 240;
+// About forty-five seconds of speech. Past that it reads the start and says where the rest is.
+const MAX_SPOKEN = 700;
+
+// Output from a command or a listing reads badly aloud: few sentences, lots of symbols.
+const looksLikeOutput = (text: string) => {
+  const letters = (text.match(/[a-z ]/gi) ?? []).length;
+  return letters / text.length < 0.75 || !/[a-z]{3,} [a-z]{2,} [a-z]{2,}/i.test(text);
+};
+
+// What the voice reads: the full answer, made speakable. Code, links and paths stay in the chat.
 export function spokenForm(text: string): string {
-  const plain = text.trim();
-  if (plain.length <= MAX_SPOKEN) return plain;
-  return "That's a long answer, sir. It's in the chat.";
+  let plain = text.trim();
+  if (plain.length <= 240 && !plain.includes("```")) return plain;
+  const hadCode = /```/.test(plain);
+  plain = plain
+    .replace(/```[\s\S]*?(```|$)/g, " ")
+    .replace(/https?:\/\/\S+/g, "a link")
+    .replace(/(^|\s)(~|\.{0,2})?\/[\w.\/-]+/g, " ")
+    .replace(/^\s*(?:[-*•]|\d+[.)])\s+(.*?)[.!?:;]?\s*$/gm, "$1.") // List items become sentences.
+    .replace(/^#+\s*(.*?)[.!?:]?\s*$/gm, "$1.")
+    .replace(/\*\*?|`|_{2}/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!plain || looksLikeOutput(plain)) return "That's a long answer, sir. It's in the chat.";
+  const sentences = plain.match(/[^.!?]+[.!?]+["')]*|[^.!?]+$/g)?.map((part) => part.trim()) ?? [plain];
+  let spoken = "";
+  for (const sentence of sentences) {
+    if (spoken && spoken.length + sentence.length > MAX_SPOKEN) return `${spoken} The rest is in the chat, sir.`;
+    spoken = spoken ? `${spoken} ${sentence}` : sentence.slice(0, MAX_SPOKEN);
+  }
+  return hadCode ? `${spoken} The code is in the chat, sir.` : spoken;
 }
 
 export class Voice {

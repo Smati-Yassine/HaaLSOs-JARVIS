@@ -8,7 +8,8 @@ import { claudeAction, clean, fastPath, looksLikeCoding, splitCommands, type Cal
 import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
-import { depthOf, type Depth } from "./thinker.ts";
+import { IDENTITY, identityAnswer } from "./identity.ts";
+import { askClaudeOnce, depthOf, type Depth } from "./thinker.ts";
 import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
 const OLLAMA = "http://localhost:11434/api/chat";
@@ -36,7 +37,7 @@ paths like ~/Downloads.`;
 const PERSONA = `You are Jarvis, a brilliant, calm, loyal English butler who is also the software running his computer. \
 You call him sir. Your humour is dry understatement. Reply in one or two short plain sentences, then stop. Never ask him \
 a question or offer anything. In this conversation you cannot do anything, only talk, so never claim to have recorded, \
-changed, adjusted, scheduled or started something. You have no sensors, calendar, email or alarms in this conversation. If you don't know a fact, say so instead of guessing.`;
+changed, adjusted, scheduled or started something. You have no sensors, calendar, email or alarms in this conversation. If you don't know a fact, say so instead of guessing.\n\n${IDENTITY}`;
 
 // A small model copies examples far better than it follows a description. These are original lines.
 const MANNER: Message[] = [
@@ -50,12 +51,14 @@ const MANNER: Message[] = [
   ["what's on my calendar?", "I can't see your calendar, sir."],
   ["order me a pizza", "I can't do that from here, sir."],
   ["thanks", "Always a pleasure, sir."],
+  ["do you know who made you?", "You did, sir. I try not to hold it against you."],
+  ["tell me about yourself", "I'm Jarvis, sir, the assistant you built to run this computer and spare you the dull parts of the day."],
 ].flatMap(([said, reply]) => [{ role: "user", content: said }, { role: "assistant", content: reply }]);
 
 // For working something out. The manner examples above teach instant one-word answers, which made
 // even the big model get sums wrong, so here it gets plain instructions and room to think first.
 const REASON = `You are Jarvis, a calm English butler who calls him sir. Work the question out carefully, step by step, in one or \
-two short plain sentences, and finish on the answer. No lists, no markdown, no offers of further help.`;
+two short plain sentences, and finish on the answer. No lists, no markdown, no offers of further help.\n\n${IDENTITY}`;
 
 // Plain code holds the line the small model won't: two sentences, and no questions it could
 // never act on, since a "yes" to one would have nothing behind it.
@@ -276,10 +279,17 @@ export function speakable(text: string): string {
     .trim();
 }
 
-// Turns Claude's final message into one spoken sentence.
-export async function summarize(message: string): Promise<string> {
+const REPORT = `You turn a coding assistant's final report into what a calm English butler says aloud to his employer. \
+Say what was done and anything he must check or decide, in two or three short plain sentences, starting with "It". \
+No code, file names, paths, lists, markdown or emoji. Don't add anything that isn't in the report.`;
+
+// Turns Claude's final message into a few spoken sentences. Claude itself does it best; the small
+// model, squeezing it into one sentence, lost what mattered, so it's only the fallback.
+export async function summarize(message: string, ask: (prompt: string, system: string) => Promise<string | null> = askClaudeOnce): Promise<string> {
   const fallback = message.split(/(?<=[.!?])\s/)[0]?.slice(0, 160) ?? "";
   if (message.length < 120) return speakable(message);
+  const good = await ask(message.slice(0, 8000), REPORT).catch(() => null);
+  if (good) return speakable(good);
   try {
     const response = await fetch(OLLAMA, {
       method: "POST",
@@ -639,6 +649,9 @@ Rewritten:`);
     // Just his name, with nothing after it. The model would only make something up.
     if (!clean(said)) return { ...this.finish(said, "Yes, sir?", "fast", begin), listen: true };
 
+    const whoAmI = identityAnswer(clean(said));
+    if (whoAmI) return this.finish(said, whoAmI, "fast", begin);
+
     const shortcut = this.ctx.claude ? claudeShortcut(clean(said), projects) : null;
     if (shortcut && "project" in shortcut) {
       this.lastProject = shortcut.project;
@@ -714,11 +727,13 @@ Rewritten:`);
       const words = namedClaude ? clean(said).replace(/^ask claude\s+(?:about\s+|if\s+|whether\s+)?/i, "") : clean(said);
       const context = this.context(said, notes);
       let depth = namedClaude ? "serious" : depthOf(clean(said));
-      if (this.lastDepth === "serious" && looksLikeFollowUp(said)) depth = "serious";
+      if (this.lastDepth !== "small" && looksLikeFollowUp(said)) depth = this.lastDepth;
       this.lastDepth = depth;
-      // Serious questions go to Claude, unless they contain something that must stay on this computer.
-      if (depth === "serious" && this.ctx.thinker && !containsSecret(said)) {
-        this.ctx.ack?.("One moment, sir.");
+      // Anything beyond small talk goes to Claude: it answers in about three seconds, where the big
+      // local model takes ten to twenty and the small one invents facts. Not when the question
+      // contains something that must stay on this computer.
+      if (depth !== "small" && this.ctx.thinker && !containsSecret(said)) {
+        if (depth === "serious") this.ctx.ack?.("One moment, sir.");
         const best = await this.ctx.thinker(this.forClaude(words, context));
         if (best) return this.finish(said, speakable(best), "model", begin, "claude_answer");
       }

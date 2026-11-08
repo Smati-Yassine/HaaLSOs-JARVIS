@@ -113,27 +113,48 @@ class Mouth:
         with self.lock:
             self.player = None
 
+    def _make(self, generation, sentences, ready):
+        """Makes each sentence's sound ahead of playback, so there's no gap while the next one is made."""
+        for sentence in sentences:
+            if generation != self.generation:
+                break
+            audio = self.cache.get(sentence)
+            if audio is None:
+                try:
+                    audio = self._synth(sentence)
+                except Exception as error:  # A bad sentence shouldn't kill the voice.
+                    emit("error", message=f"voice: {error}")
+                    continue
+            ready.put(audio)
+        ready.put(None)
+
     def _run(self):
         while True:
             generation, text, then_listen = self.jobs.get()
             first = True
             begin = time.perf_counter()
-            for sentence in self.sentences(text):
-                if generation != self.generation:
-                    break
-                audio = self.cache.get(sentence)
-                if audio is None:
-                    try:
-                        audio = self._synth(sentence)
-                    except Exception as error:  # A bad sentence shouldn't kill the voice.
-                        emit("error", message=f"voice: {error}")
-                        continue
-                if generation != self.generation:
+            ready = queue.Queue(maxsize=2)
+            threading.Thread(target=self._make, args=(generation, self.sentences(text), ready), daemon=True).start()
+            while True:
+                try:
+                    audio = ready.get(timeout=0.2)
+                except queue.Empty:
+                    if generation != self.generation:
+                        break
+                    continue
+                if audio is None or generation != self.generation:
                     break
                 if first:
                     first = False
                     emit("speaking", active=True, first_audio_ms=round((time.perf_counter() - begin) * 1000))
                 self._play(audio)
+            # An interrupted maker may be waiting to hand over a sentence. Let it finish and exit.
+            while generation != self.generation:
+                try:
+                    if ready.get(timeout=0.5) is None:
+                        break
+                except queue.Empty:
+                    break
             if generation == self.generation:
                 emit("speaking", active=False)
                 if then_listen:

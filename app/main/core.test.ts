@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { askClaudeOnce, depthOf } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
-import { isHesitation, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
+import { summarize, isHesitation, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
@@ -16,6 +16,7 @@ import { claudeShortcut, findProject, newProjectRequest, projectInSentence, proj
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { findArgs, inYourWords, rankFiles, reminderMessage, describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
 import { spokenForm } from "./voice.ts";
+import { identityAnswer } from "./identity.ts";
 import { answerPrompt, siteName, topResults } from "./web.ts";
 import { decodeReply, knownAction, pickWindow } from "./windows.ts";
 
@@ -163,6 +164,25 @@ test("extension replies are decoded", () => {
 test("long output isn't read aloud", () => {
   assert.equal(spokenForm("It's 22:40, sir."), "It's 22:40, sir.");
   assert.match(spokenForm("x".repeat(300)), /in the chat/);
+  assert.match(spokenForm("total 32\ndrwxrwxr-x 2 haalso haalso 4096 Nov 5 22:50 .\n-rw------- 1 haalso haalso 17415 Nov 6 commands.jsonl\n".repeat(3)), /in the chat/);
+});
+
+test("a long spoken answer is read in full, without code or paths", () => {
+  const answer = "The sky is blue because of Rayleigh scattering. Sunlight contains all colours, and air molecules scatter shorter wavelengths much more strongly than longer ones. That scattered blue light reaches your eyes from every direction in the sky. The sky isn't violet because the sun emits less violet light, and our eyes are less sensitive to it.";
+  assert.equal(spokenForm(answer), answer);
+  const report = "I added dark mode to the settings page.\n\n- New toggle in /src/settings/Theme.tsx\n- Colours saved in **localStorage**\n\n```ts\nconst x = 1;\n```\nRun the app and flip the toggle to check it.";
+  const spoken = spokenForm(report);
+  assert.doesNotMatch(spoken, /src|```|\*\*|const x/);
+  assert.match(spoken, /^I added dark mode.*New toggle in.*Colours saved in localStorage\..*flip the toggle.*The code is in the chat, sir\.$/);
+  const essay = "This is one fairly ordinary sentence about nothing. ".repeat(40);
+  const cut = spokenForm(essay);
+  assert.ok(cut.length < 760 && cut.endsWith("The rest is in the chat, sir."), cut);
+});
+
+test("Jarvis knows who built him", () => {
+  for (const said of ["who built you", "who made you?", "who created you jarvis", "who's your creator", "which company made you", "who do you work for", "are you made by meta?"]) assert.ok(identityAnswer(said), said);
+  assert.match(identityAnswer("who built you")!, /you/i);
+  for (const said of ["who built the pyramids", "what time is it", "who made the iphone", "are you there"]) assert.equal(identityAnswer(said), null, said);
 });
 
 test("while a project is open, coding goes to Claude with the exact words", async () => {
@@ -1065,6 +1085,21 @@ test("a question with a secret never leaves the computer, and small talk spends 
   assert.notEqual((await jarvis.handle("why does my password keep failing")).tool, "claude_answer");
   assert.notEqual((await jarvis.handle("thanks")).tool, "claude_answer");
   assert.equal(asked, 0);
+});
+
+test("facts and puzzles go to Claude too, and who built him never leaves the computer", async () => {
+  let asked = 0;
+  const jarvis = new Jarvis({ dryRun: true, thinker: async () => { asked += 1; return "Lima, sir."; } });
+  assert.equal((await jarvis.handle("who painted the Mona Lisa?")).tool, "claude_answer");
+  assert.equal((await jarvis.handle("if I have 3 apples and eat one how many do I have?")).tool, "claude_answer");
+  const who = await jarvis.handle("who built you?");
+  assert.match(who.say, /You did, sir/);
+  assert.equal(asked, 2);
+});
+
+test("Claude's finished report is told by Claude, with the small model only as a fallback", async () => {
+  const report = "I added a dark mode toggle to the settings page, stored the choice in local storage, and updated the tests. All 40 tests pass.";
+  assert.equal(await summarize(report, async () => "It added a dark mode switch to the settings page, sir, and every test passes."), "It added a dark mode switch to the settings page, sir, and every test passes.");
 });
 
 test("if Claude can't answer, Jarvis still does", async () => {
