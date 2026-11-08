@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { askClaudeOnce, depthOf } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
-import { summarize, isHesitation, isPlainQuestion, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
+import { summarize, isHesitation, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
@@ -1131,13 +1131,23 @@ test("a serious question goes to Claude with what it needs, and comes back label
   assert.match(prompts[0], /I live in Tunis/);
 });
 
-test("a question with a secret never leaves the computer, and small talk spends nothing", async () => {
+test("a question with a secret never leaves the computer, and small talk goes to Claude", async () => {
   let asked = 0;
   const thinker = async () => { asked += 1; return "from claude"; };
   const jarvis = new Jarvis({ dryRun: true, thinker });
   assert.notEqual((await jarvis.handle("why does my password keep failing")).tool, "claude_answer");
-  assert.notEqual((await jarvis.handle("thanks")).tool, "claude_answer");
   assert.equal(asked, 0);
+  assert.equal((await jarvis.handle("thanks")).tool, "claude_answer");
+  assert.equal((await jarvis.handle("good morning")).tool, "claude_answer");
+  assert.equal(asked, 2);
+});
+
+test("small talk skips choosing an action unless it mentions one, and repeats are caught", () => {
+  for (const said of ["good morning", "thanks", "how are you", "you're the best"]) assert.ok(isPlainTalk(said), said);
+  for (const said of ["are you able to open firefox", "hey play some music", "thanks, set a timer"]) assert.equal(isPlainTalk(said), false, said);
+  assert.ok(isRepeat("Always a pleasure, sir.", []));
+  assert.ok(isRepeat("Indeed, sir.", [{ role: "assistant", content: "Indeed, sir." }]));
+  assert.equal(isRepeat("Good morning, sir. Coffee first, I trust.", []), false);
 });
 
 test("facts and puzzles go to Claude too, and who built him never leaves the computer", async () => {

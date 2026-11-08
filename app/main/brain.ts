@@ -9,7 +9,7 @@ import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, t
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
 import { IDENTITY, identityAnswer } from "./identity.ts";
-import { askClaudeOnce, depthOf, type Depth } from "./thinker.ts";
+import { askClaudeOnce, depthOf, isSmallTalk, type Depth } from "./thinker.ts";
 import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
 const OLLAMA = "http://localhost:11434/api/chat";
@@ -220,6 +220,13 @@ async function plainAnswer(prompt: string, limit = 60): Promise<string> {
   return (message.content ?? "").trim();
 }
 
+const EXAMPLE_LINES = new Set(MANNER.filter((line) => line.role === "assistant").map((line) => line.content.toLowerCase()));
+// A reply that's one of the examples, or something Jarvis said a moment ago.
+export const isRepeat = (answer: string, history: Message[]) => {
+  const said = answer.trim().toLowerCase();
+  return EXAMPLE_LINES.has(said) || history.slice(-8).some((line) => line.role === "assistant" && line.content.trim().toLowerCase() === said);
+};
+
 // "I just deleted my project" is news, not a request to close it. These stay conversation,
 // unless he's asking for something: "I need the calculator", "I'm done coding for today".
 export const isStatementAboutSelf = (said: string) => {
@@ -251,6 +258,8 @@ export const isPlainQuestion = (said: string) => {
   const text = clean(said);
   return QUESTION_START.test(text) && !NOT_PLAIN.test(text) && !said.includes("\n") && depthOf(text) !== "small";
 };
+// Small talk can't want an action either, unless it mentions one.
+export const isPlainTalk = (said: string) => isSmallTalk(clean(said)) && !NOT_PLAIN.test(clean(said)) && !said.includes("\n");
 
 const FOLLOW_UP_START =/^(and|so|but|what about|how about|why|when|where|who|how|what|which|is|are|was|were|does|did|can)\b/i;
 const POINTS_AT_BEFORE = /^(and|what about|how about)\b|\b(he|she|they|him|her|them|it|that|there|those|his|their|its)\b/i;
@@ -727,7 +736,7 @@ Rewritten:`);
 
     try {
       // A plain question goes to Claude with the whole conversation, so it needs no rewriting either.
-      const plain = Boolean(this.ctx.thinker) && isPlainQuestion(said) && !containsSecret(said);
+      const plain = Boolean(this.ctx.thinker) && (isPlainQuestion(said) || isPlainTalk(said)) && !containsSecret(said);
       const asked = plain ? said : await this.standalone(said);
       const notes = this.memory?.relevant(asked) ?? [];
       // Choosing an action looks only at this request. With earlier chat in view, the small model
@@ -741,10 +750,10 @@ Rewritten:`);
       let depth = namedClaude ? "serious" : depthOf(clean(said));
       if (this.lastDepth !== "small" && looksLikeFollowUp(said)) depth = this.lastDepth;
       this.lastDepth = depth;
-      // Anything beyond small talk goes to Claude: it answers in about three seconds, where the big
-      // local model takes ten to twenty and the small one invents facts. Not when the question
-      // contains something that must stay on this computer.
-      if (depth !== "small" && this.ctx.thinker && !containsSecret(said)) {
+      // Everything goes to Claude, small talk too: the small local model invents facts and copies
+      // its example lines word for word, so it repeated itself. Claude starts speaking in about
+      // 1.5 seconds. Not when the words contain something that must stay on this computer.
+      if (this.ctx.thinker && !containsSecret(said)) {
         const speech = this.ctx.speech?.();
         // When the answer is spoken as it comes, its first sentence is quicker than this would be.
         if (depth === "serious" && !speech) this.ctx.ack?.("One moment, sir.");
@@ -762,7 +771,10 @@ Rewritten:`);
       // A real question wants the right answer, and only small talk gets room to be clever.
       // The real time only confuses a puzzle: "a train leaves at 3" became 13:36.
       const background = depth === "reasoning" ? context.slice(1) : context;
-      const answer = await chatReply([...this.history, { role: "user", content: said }], background, depth === "small" ? 0.6 : 0.1, useDeep);
+      const talk = [...this.history, { role: "user", content: said }];
+      let answer = await chatReply(talk, background, depth === "small" ? 0.6 : 0.1, useDeep);
+      // The small model likes to reuse an example or its own last lines. Once more, looser.
+      if (isRepeat(answer, this.history)) answer = await chatReply(talk, background, 1, useDeep);
       // The small model gave up on a request, so the one that can do it gets it. Only a plain
       // "I can't" at the start counts: a dry remark may well contain the word.
       if (this.ctx.claude && isRefusal(answer) && !/\?\s*$/.test(said)) {
