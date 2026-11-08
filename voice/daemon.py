@@ -85,12 +85,13 @@ class Mouth:
         parts = re.split(r"(?<=[.!?])\s+", text.strip())
         return [part for part in parts if part.strip()]
 
-    def say(self, text, then_listen=False, more=False):
-        """more: another part of the same answer follows, as when Claude's answer streams in."""
+    def say(self, text, then_listen=False, more=False, tag=None):
+        """more: another part of the same answer follows, as when Claude's answer streams in.
+        tag: the reply's number, sent back with each sentence so the window shows it as it's said."""
         with self.lock:
             self.pending += 1
             self.busy.set()
-            self.jobs.put((self.generation, text, then_listen, more))
+            self.jobs.put((self.generation, text, then_listen, more, tag))
 
     def stop(self):
         """Interrupted: drop everything queued and cut the current sound."""
@@ -99,7 +100,7 @@ class Mouth:
             player = self.player
         if player:
             player.terminate()
-        emit("speaking", active=False)
+        emit("speaking", active=False, stopped=True)
 
     def _play(self, audio):
         if self.silent:
@@ -123,7 +124,7 @@ class Mouth:
     def _make(self):
         """Makes each sentence's sound ahead of playback, even across messages, so there's no gap."""
         while True:
-            generation, text, then_listen, more = self.jobs.get()
+            generation, text, then_listen, more, tag = self.jobs.get()
             begin = time.perf_counter()
             for sentence in self.sentences(text):
                 if generation != self.generation:
@@ -135,8 +136,8 @@ class Mouth:
                     except Exception as error:  # A bad sentence shouldn't kill the voice.
                         emit("error", message=f"voice: {error}")
                         continue
-                self.ready.put(("audio", generation, audio, begin))
-            self.ready.put(("end", generation, then_listen, more))
+                self.ready.put(("audio", generation, audio, begin, sentence, tag))
+            self.ready.put(("end", generation, then_listen, more, tag))
 
     def _run(self):
         speaking = False
@@ -149,14 +150,15 @@ class Mouth:
                 if not speaking:
                     speaking = True
                     emit("speaking", active=True, first_audio_ms=round((time.perf_counter() - item[3]) * 1000))
+                emit("saying", text=item[4], seconds=round(len(item[2]) / VOICE_RATE, 2), tag=item[5])
                 self._play(item[2])
                 continue
-            _, _, then_listen, more = item
+            _, _, then_listen, more, tag = item
             if not current:
                 speaking = False
             elif not more:
                 speaking = False
-                emit("speaking", active=False)
+                emit("speaking", active=False, tag=tag)
                 if then_listen:
                     emit("follow_up")
             with self.lock:
@@ -279,7 +281,8 @@ class Daemon:
                 continue
             kind = command.get("type")
             if kind == "speak":
-                self.mouth.say(str(command.get("text", "")), bool(command.get("then_listen")), bool(command.get("more")))
+                tag = command.get("tag")
+                self.mouth.say(str(command.get("text", "")), bool(command.get("then_listen")), bool(command.get("more")), tag if isinstance(tag, int) else None)
             elif kind == "stop":
                 self.mouth.stop()
             elif kind == "mute":

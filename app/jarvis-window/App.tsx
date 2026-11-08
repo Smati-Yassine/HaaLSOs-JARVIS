@@ -5,12 +5,18 @@ import { ClaudeBand, ClaudePanel, type Snapshot } from "./ClaudePanel";
 import { Line, LineEngine, type Mood, type StrandItem } from "./Line";
 
 type Pending = { command: string; level: "run" | "say-back" | "confirm"; options?: string[]; title?: string };
-type Reply = { say: string; source: string; tool?: string; pending?: Pending; ms: number };
+type Reply = { say: string; source: string; tool?: string; pending?: Pending; ms: number; tag?: number };
 type Turn = { role: "user" | "jarvis"; text: string };
 type Chat = { id: number; title: string; updated: number; turns: number };
 type Fact = { id: number; text: string };
 // A restored message is shown as it is, without the letters resolving again.
-type Message = { id: number; from: "jarvis" | "you"; text: string; restored?: boolean; viaClaude?: boolean; fromClaude?: boolean };
+// A spoken message is live while the voice says it: each sentence appears as it's said, over
+// exactly the time it takes to say. Then it settles into its full text.
+type Part = { text: string; seconds: number };
+type Message = {
+  id: number; from: "jarvis" | "you"; text: string; restored?: boolean; viaClaude?: boolean; fromClaude?: boolean;
+  tag?: number; live?: boolean; parts?: Part[]; final?: string; settled?: boolean;
+};
 type Reminder = { id: number; kind: string; text: string; due: number };
 type VoiceEvent = {
   type: string;
@@ -19,6 +25,9 @@ type VoiceEvent = {
   on?: boolean;
   active?: boolean;
   message?: string;
+  tag?: number;
+  seconds?: number;
+  stopped?: boolean;
 };
 type VoiceStatus = "off" | "loading" | "on" | "muted";
 
@@ -36,10 +45,10 @@ declare global {
       reminders(): Promise<Reminder[]>;
       deleteReminder(id: number): Promise<void>;
       warmUp(): Promise<boolean>;
-      welcome(text: string): Promise<void>;
+      welcome(text: string): Promise<number | undefined>;
       setTheme(mode: "dark" | "light"): Promise<void>;
       setMuted(muted: boolean): Promise<void>;
-      voiceAvailable(): Promise<boolean>;
+      voiceAvailable(): Promise<"off" | "loading" | "ready">;
       health(): Promise<string[]>;
       getAutostart(): Promise<boolean>;
       setAutostart(enabled: boolean): Promise<boolean>;
@@ -102,6 +111,61 @@ function Spoken({ text }: { text: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return <p aria-label={text}>{shown}</p>;
+}
+
+// Words that appear as the voice says them. Earlier sentences are whole; the one being said
+// resolves across the length of its sound.
+function Voiced({ parts }: { parts: Part[] }) {
+  const [at, setAt] = useState(0);
+  const latest = parts.at(-1);
+  useEffect(() => {
+    if (!latest) return;
+    if (calm) return setAt(latest.text.length);
+    setAt(0);
+    const progress = { value: 0 };
+    const tween = gsap.to(progress, {
+      value: latest.text.length,
+      duration: Math.max(0.2, latest.seconds * 0.92),
+      ease: "none",
+      onUpdate: () => setAt(Math.floor(progress.value)),
+      onComplete: () => setAt(latest.text.length),
+    });
+    return () => void tween.kill();
+  }, [parts.length, latest]);
+  const before = parts.slice(0, -1).map((part) => part.text).join(" ");
+  let now = latest ? latest.text.slice(0, at) : "";
+  if (latest && at < latest.text.length) {
+    for (let i = at; i < Math.min(latest.text.length, at + 4); i++) now += latest.text[i] === " " ? " " : GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
+  }
+  const full = parts.map((part) => part.text).join(" ");
+  return <p aria-label={full}>{before && `${before} `}{now}</p>;
+}
+
+// Jarvis waking up: what's starting, until everything he needs is ready.
+type Step = "wait" | "ok" | "off" | "warn" | "fail";
+const BOOT_STEPS = [
+  ["model", "Language model"],
+  ["voice", "Voice"],
+  ["checks", "System checks"],
+] as const;
+const STEP_WORDS: Record<Step, string> = { wait: "starting", ok: "online", off: "not installed", warn: "needs attention", fail: "offline" };
+
+function Boot({ steps, leaving }: { steps: Record<string, Step>; leaving: boolean }) {
+  const done = Object.values(steps).filter((step) => step !== "wait").length;
+  return (
+    <div className={`boot${leaving ? " leaving" : ""}`} role="status" aria-label="Jarvis is starting">
+      <div className="boot-mark">JARVIS</div>
+      <div className="boot-bar"><span style={{ width: `${(100 * (done + 0.35)) / (BOOT_STEPS.length + 0.35)}%` }} /></div>
+      <ul className="boot-steps">
+        {BOOT_STEPS.map(([key, label]) => (
+          <li key={key} data-step={steps[key]}>
+            <span>{label}</span>
+            <span>{STEP_WORDS[steps[key]]}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 // A decision sits above the message box, so it can't scroll away while Claude waits on it.
@@ -328,6 +392,11 @@ export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(true);
+  const [booting, setBooting] = useState(true);
+  const [leaving, setLeaving] = useState(false);
+  const [steps, setSteps] = useState<Record<string, Step>>({ model: "wait", voice: "wait", checks: "wait" });
+  // Called once the voice is ready, or known not to be coming.
+  const voiceUp = useRef<(ready: boolean) => void>(() => {});
   const [mood, setMood] = useState<Mood>("idle");
   const [pulse, setPulse] = useState(0);
   const [prefsOpen, setPrefsOpen] = useState(false);
@@ -385,9 +454,26 @@ export function App() {
     box.style.height = `${Math.min(box.scrollHeight, 200)}px`;
   }, [draft, prefsOpen]);
 
-  const speak = useCallback((text: string, withPending?: Pending, tool?: string) => {
+  // A spoken message finished, or was cut off: it shows its full text from now on.
+  const settle = useCallback((which: (message: Message) => boolean) => {
+    setMessages((list) => list.map((message) => (message.live && which(message)
+      ? { ...message, live: false, settled: true, text: message.final ?? (message.parts ?? []).map((part) => part.text).join(" ") }
+      : message)));
+  }, []);
+
+  const speak = useCallback((text: string, withPending?: Pending, tool?: string, tag?: number) => {
     const fromClaude = tool === "claude";
-    setMessages((list) => [...list, { id: nextId++, from: "jarvis", text, viaClaude: tool === "claude_answer", fromClaude }]);
+    const viaClaude = tool === "claude_answer";
+    if (tag === undefined) {
+      setMessages((list) => [...list, { id: nextId++, from: "jarvis", text, viaClaude, fromClaude }]);
+    } else {
+      // Shown as the voice says it. An answer that streamed may already be partly on screen.
+      setMessages((list) => list.some((message) => message.tag === tag)
+        ? list.map((message) => (message.tag === tag ? { ...message, final: text, viaClaude, fromClaude, ...(message.live ? {} : { text }) } : message))
+        : [...list, { id: nextId++, from: "jarvis", text: "", tag, live: true, parts: [], final: text, viaClaude, fromClaude }]);
+      // If the voice never gets to it, the words still appear.
+      window.setTimeout(() => settle((message) => message.tag === tag && !message.parts?.length), 6000);
+    }
     setPending(withPending ?? null);
     setClaudeAsking(fromClaude && Boolean(withPending));
     // A question has to be seen, so it closes Preferences if they're open.
@@ -397,14 +483,14 @@ export function App() {
     if (tool === "ask_claude") engine.packet(busyId, true);
     if (fromClaude) engine.packet(busyId, false);
     // With a voice, the line follows the real sound. Without one, it estimates.
-    if (voiceRef.current === "on" || voiceRef.current === "muted" || voiceRef.current === "loading") return;
+    if (tag !== undefined || voiceRef.current === "on" || voiceRef.current === "muted" || voiceRef.current === "loading") return;
     setMood("speaking");
     window.clearTimeout(stopSpeaking.current);
     stopSpeaking.current = window.setTimeout(
       () => setMood("idle"),
       calm ? 150 : Math.min(3400, 900 + text.length * 34),
     );
-  }, [engine]);
+  }, [engine, settle]);
 
   const updateVoice = useCallback((status: VoiceStatus) => {
     voiceRef.current = status;
@@ -412,18 +498,34 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    window.jarvis.voiceAvailable().then((available) => updateVoice(available ? "loading" : "off"));
+    window.jarvis.voiceAvailable().then((state) => {
+      if (voiceRef.current !== "loading" || state === "loading") return;
+      updateVoice(state === "ready" ? "on" : "off");
+      voiceUp.current(state === "ready");
+    });
     return window.jarvis.onEvent((event) => {
       switch (event.type) {
         case "ready":
           updateVoice("on");
+          voiceUp.current(true);
           break;
+        case "saying": {
+          const tag = event.tag;
+          if (tag === undefined || !event.text) break; // Untagged words, like "one moment", aren't shown.
+          const part = { text: event.text, seconds: event.seconds ?? 1 };
+          setMessages((list) => list.some((message) => message.tag === tag)
+            ? list.map((message) => (message.tag === tag && message.live ? { ...message, parts: [...(message.parts ?? []), part] } : message))
+            : [...list, { id: nextId++, from: "jarvis", text: "", tag, live: true, parts: [part], viaClaude: true }]);
+          break;
+        }
         case "mic":
           if (voiceRef.current !== "loading") updateVoice(event.on ? "on" : "muted");
           break;
         case "gone":
           updateVoice("off");
           setMood("idle");
+          voiceUp.current(false);
+          settle(() => true);
           break;
         case "voice-restarting":
           updateVoice("loading");
@@ -446,7 +548,7 @@ export function App() {
           setMood("idle");
           break;
         case "reply":
-          speak(event.reply!.say, event.reply!.pending, event.reply!.tool);
+          speak(event.reply!.say, event.reply!.pending, event.reply!.tool, event.reply!.tag);
           setBusy(false);
           break;
         case "chat-reset":
@@ -456,6 +558,8 @@ export function App() {
           break;
         case "speaking":
           setMood(event.active ? "speaking" : "idle");
+          if (event.stopped) settle(() => true);
+          else if (!event.active && event.tag !== undefined) settle((message) => message.tag === event.tag);
           break;
         case "show-claude":
           if (engine.snap === "low") engine.setSnap("mid");
@@ -468,7 +572,7 @@ export function App() {
           break;
       }
     });
-  }, [engine, speak, updateVoice]);
+  }, [engine, speak, settle, updateVoice]);
 
   useEffect(() => {
     window.jarvis.getAutostart().then(setAutostart);
@@ -519,20 +623,30 @@ export function App() {
   useEffect(() => {
     let alive = true;
     const started = Date.now();
-    window.jarvis.warmUp().then((ready) => {
+    const mark = (key: string, step: Step) => setSteps((now) => ({ ...now, [key]: step }));
+    const model = window.jarvis.warmUp().then((ready) => (mark("model", ready ? "ok" : "fail"), ready));
+    const checks = window.jarvis.health().then((problems) => {
+      mark("checks", problems.filter((problem) => !problem.startsWith("Ollama")).length ? "warn" : "ok");
+      return problems;
+    });
+    // The voice takes longest to load. Past a minute, Jarvis starts without it and it joins later.
+    const voiceReady = new Promise<boolean>((resolve) => {
+      voiceUp.current = resolve;
+      window.setTimeout(() => resolve(false), 60_000);
+    }).then((ready) => (mark("voice", ready ? "ok" : voiceRef.current === "off" ? "off" : "fail"), ready));
+    Promise.all([model, checks, voiceReady]).then(async ([ready, problems]) => {
       if (!alive) return;
-      window.setTimeout(() => {
-        const welcome = ready ? "Welcome back, sir. All systems online." : "Welcome back, sir. Ollama isn't running, so I can only do simple commands.";
-        speak(welcome);
-        window.jarvis.welcome(welcome);
-        // Only speaks up when something's actually wrong. "Ollama isn't running" is already said.
-        window.jarvis.health().then((problems) => {
-          const rest = problems.filter((problem) => !problem.startsWith("Ollama"));
-          if (rest.length) window.setTimeout(() => speak(`One thing to know, sir: ${rest.join("; ")}.`), 2500);
-        });
-        setBusy(false);
-        input.current?.focus();
-      }, Math.max(0, 900 - (Date.now() - started)));
+      await new Promise((done) => window.setTimeout(done, Math.max(400, 1600 - (Date.now() - started))));
+      setLeaving(true);
+      await new Promise((done) => window.setTimeout(done, calm ? 0 : 650));
+      setBooting(false);
+      const welcome = ready ? "Welcome back, sir. All systems online." : "Welcome back, sir. Ollama isn't running, so I can only do simple commands.";
+      speak(welcome, undefined, undefined, await window.jarvis.welcome(welcome));
+      // Only speaks up when something's actually wrong. "Ollama isn't running" is already said.
+      const rest = problems.filter((problem) => !problem.startsWith("Ollama"));
+      if (rest.length) window.setTimeout(() => speak(`One thing to know, sir: ${rest.join("; ")}.`), 3500);
+      setBusy(false);
+      input.current?.focus();
     });
     return () => {
       alive = false;
@@ -550,7 +664,7 @@ export function App() {
       setMessages((list) => [...list, { id: nextId++, from: "you", text: said }]);
       try {
         const reply = await window.jarvis.ask(said);
-        speak(reply.say, reply.pending, reply.tool);
+        speak(reply.say, reply.pending, reply.tool, reply.tag);
         if (voiceRef.current !== "on" && voiceRef.current !== "muted") setMood("idle");
       } catch {
         speak("Something went wrong on my side, sir. Please try again.");
@@ -566,7 +680,7 @@ export function App() {
       setPending(null);
       setMessages((list) => [...list, { id: nextId++, from: "you", text: label }]);
       const reply = await window.jarvis.choose(index, label);
-      speak(reply.say, reply.pending);
+      speak(reply.say, reply.pending, undefined, reply.tag);
       input.current?.focus();
     },
     [speak],
@@ -668,10 +782,10 @@ export function App() {
               {messages.map((message, index) => (
                 <div
                   key={message.id}
-                  className={`message ${message.from}${index === lastJarvis ? " latest" : ""}${index === messages.length - 1 ? " now" : ""}${index === lastJarvis && message.text.length <= 180 ? " big" : ""}`}
+                  className={`message ${message.from}${index === lastJarvis ? " latest" : ""}${index === messages.length - 1 ? " now" : ""}${index === lastJarvis && (message.final ?? message.text).length <= 180 ? " big" : ""}`}
                 >
-                  {message.from === "jarvis" && (message.viaClaude || message.fromClaude) && <small>{message.viaClaude ? "Jarvis, asking Claude" : "From Claude"}</small>}
-                  {message.from === "jarvis" && !message.restored ? <Spoken text={message.text} /> : <p>{message.text}</p>}
+                  {message.from === "jarvis" && (message.viaClaude || message.fromClaude) && !(message.live && !message.parts?.length) && <small>{message.viaClaude ? "Jarvis, asking Claude" : "From Claude"}</small>}
+                  {message.live ? <Voiced parts={message.parts ?? []} /> : message.from === "jarvis" && !message.restored && !message.settled ? <Spoken text={message.text} /> : <p>{message.text}</p>}
                 </div>
               ))}
               {busy && <span className="sr-only" role="status">Jarvis is thinking</span>}
@@ -762,6 +876,8 @@ export function App() {
           </svg>
         </button>
       </form>
+
+      {booting && <Boot steps={steps} leaving={leaving} />}
 
       {messages.length <= 1 && !pending && !openProject && !prefsOpen && (
         <div className="hints">

@@ -10,7 +10,8 @@ export type VoiceEvent =
   | { type: "mic"; on: boolean }
   | { type: "wake"; score: number }
   | { type: "heard"; text: string; stt_ms?: number }
-  | { type: "speaking"; active: boolean; first_audio_ms?: number }
+  | { type: "speaking"; active: boolean; first_audio_ms?: number; tag?: number; stopped?: boolean }
+  | { type: "saying"; text: string; seconds: number; tag?: number }
   | { type: "follow_up" }
   | { type: "error"; message: string; fatal?: boolean }
   | { type: "gone" };
@@ -164,13 +165,13 @@ export class Voice {
     if (this.child?.stdin.writable) this.child.stdin.write(JSON.stringify(message) + "\n");
   }
 
-  say(text: string, thenListen = false) {
-    if (text.trim()) this.send({ type: "speak", text: spokenForm(text), then_listen: thenListen });
+  say(text: string, thenListen = false, tag?: number) {
+    if (text.trim()) this.send({ type: "speak", text: spokenForm(text), then_listen: thenListen, tag });
   }
   // For an answer that's still being written. Nothing more is spoken once something stops the voice.
-  stream(): SpeechStream {
+  stream(tag?: number): SpeechStream {
     const turn = this.turn;
-    return new SpeechStream((text, more) => this.send({ type: "speak", text, then_listen: false, more }), () => this.turn === turn);
+    return new SpeechStream((text, more) => this.send({ type: "speak", text, then_listen: false, more, tag }), () => this.turn === turn);
   }
   stop() {
     this.turn += 1;

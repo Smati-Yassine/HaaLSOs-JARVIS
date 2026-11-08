@@ -80,6 +80,8 @@ export type Reply = {
   spoken?: string;
   // Jarvis asked something, so the microphone should open without the wake word.
   listen?: boolean;
+  // Ties the reply to its speech, so the window can show each sentence as it's said.
+  tag?: number;
   ms: number;
 };
 

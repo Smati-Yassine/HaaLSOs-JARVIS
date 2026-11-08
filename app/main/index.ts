@@ -37,11 +37,18 @@ const jarvis = new Jarvis({
   dryRun: process.env.JARVIS_DRY_RUN === "1",
   ack: (words) => voice?.say(words), // Searching takes seconds, so Jarvis says so first.
   thinker: (prompt, onText) => askClaudeOnce(prompt, undefined, "claude", onText),
-  speech: () => voice?.stream() ?? null,
+  speech: () => voice?.stream(answering) ?? null,
   clipboard: { read: () => clipboard.readText(), write: (text) => clipboard.writeText(text) },
 }, memory);
 let window: BrowserWindow | null = null;
 let voice: Voice | null = null;
+let voiceReady = false;
+// Every spoken reply gets a number, and the voice reports each sentence with it as it's said,
+// so the window shows the words at the moment they're spoken.
+let tags = 0;
+const nextTag = () => ++tags;
+// The request being answered right now, so an answer that's spoken as it streams in gets its number.
+let answering = 0;
 
 // Claude can't continue until the user answers, so questions wait in line here.
 // `menu` means the options were read off Claude's screen, so their numbers are its real numbers.
@@ -117,11 +124,11 @@ function dropGate(gate: Gate) {
 }
 
 function announce(say: string, pending?: Pending, spoken = say) {
-  const reply: Reply = { say, source: "tool", tool: "claude", pending, ms: 0 };
+  const reply: Reply = { say, source: "tool", tool: "claude", pending, ms: 0, tag: voiceReady && spoken.trim() ? nextTag() : undefined };
   toWindow({ type: "reply", reply });
   // Questions vanish once answered. Only lasting news belongs in the conversation.
   if (!pending) jarvis.note(say);
-  voice?.say(spoken, Boolean(pending));
+  voice?.say(spoken, Boolean(pending), reply.tag);
 }
 
 function enqueue(item: Asking) {
@@ -272,7 +279,16 @@ function sayDueReminders() {
 }
 
 function speakReply(reply: Reply) {
-  voice?.say(reply.spoken ?? reply.say, Boolean(reply.pending || reply.listen));
+  voice?.say(reply.spoken ?? reply.say, Boolean(reply.pending || reply.listen), reply.tag);
+}
+
+// Answers a request and numbers the reply for the voice, when there's a voice to say it.
+async function answer(said: string): Promise<Reply> {
+  const tag = (answering = nextTag());
+  const reply = await handleSaid(said);
+  const spoken = reply.spoken ?? reply.say;
+  // An empty spoken form means it was already said while it streamed in.
+  return voiceReady && (spoken.trim() || reply.spoken === "") ? { ...reply, tag } : reply;
 }
 
 const NEW_CHAT = /^(jarvis,? )?(please )?(let'?s )?(start |begin |open )?(a )?new (chat|conversation)( please)?[.!]?$/i;
@@ -305,8 +321,14 @@ function restartVoice() {
 
 async function onVoiceEvent(event: VoiceEvent) {
   if (event.type === "follow_up") return voice?.listen();
-  if (event.type === "ready") setTimeout(() => (voiceCrashes = 0), 60_000).unref();
-  if (event.type === "gone") restartVoice();
+  if (event.type === "ready") {
+    voiceReady = true;
+    setTimeout(() => (voiceCrashes = 0), 60_000).unref();
+  }
+  if (event.type === "gone") {
+    voiceReady = false;
+    restartVoice();
+  }
   if (event.type !== "heard") return toWindow(event);
   const said = event.text.trim();
   if (!said) return toWindow({ type: "heard", text: "" });
@@ -316,7 +338,7 @@ async function onVoiceEvent(event: VoiceEvent) {
     if (claude.interrupt()) return announce("Stopped Claude, sir.");
     return toWindow({ type: "stopped" });
   }
-  const reply = await handleSaid(said);
+  const reply = await answer(said);
   toWindow({ type: "reply", reply });
   speakReply(reply);
 }
@@ -357,7 +379,7 @@ function createWindow() {
 
 ipcMain.handle("jarvis:ask", async (_event, said: unknown) => {
   voice?.stop();
-  const reply = await handleSaid(String(said).slice(0, 8000));
+  const reply = await answer(String(said).slice(0, 8000));
   speakReply(reply);
   return reply;
 });
@@ -366,8 +388,9 @@ ipcMain.handle("jarvis:choose", (_event, index: unknown, label: unknown) => {
   const reply = chooseOption(Number(index));
   if (!reply) return { say: "That question has already moved on, sir.", source: "fast", ms: 0 } satisfies Reply;
   jarvis.record(String(label), reply.say);
-  speakReply(reply);
-  return reply;
+  const tagged = voiceReady ? { ...reply, tag: nextTag() } : reply;
+  speakReply(tagged);
+  return tagged;
 });
 ipcMain.handle("chats:list", () => ({ chats: memory.chats(), current: memory.currentChat }));
 ipcMain.handle("chats:open", (_event, id: unknown) => jarvis.openChat(Number(id)));
@@ -378,9 +401,13 @@ ipcMain.handle("facts:delete", (_event, id: unknown) => jarvis.forgetFact(Number
 ipcMain.handle("reminders:list", () => memory.upcomingReminders());
 ipcMain.handle("reminders:delete", (_event, id: unknown) => memory.deleteReminder(Number(id)));
 ipcMain.handle("jarvis:warm-up", () => jarvis.warmUp().then(() => true, () => false));
-ipcMain.handle("jarvis:welcome", (_event, text: unknown) => voice?.say(String(text)));
+ipcMain.handle("jarvis:welcome", (_event, text: unknown) => {
+  const tag = voiceReady ? nextTag() : undefined;
+  voice?.say(String(text), false, tag);
+  return tag;
+});
 ipcMain.handle("voice:mute", (_event, muted: unknown) => voice?.setMuted(Boolean(muted)));
-ipcMain.handle("voice:available", () => voice !== null);
+ipcMain.handle("voice:available", () => (voice === null ? "off" : voiceReady ? "ready" : "loading"));
 ipcMain.handle("theme:set", (_event, mode: unknown) => {
   nativeTheme.themeSource = mode === "light" ? "light" : "dark";
 });
