@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { DatabaseSync } from "node:sqlite";
 
-import { askClaudeOnce, depthOf } from "./thinker.ts";
+import { askClaudeOnce, depthOf, needsDeep } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
@@ -1264,4 +1264,35 @@ test("a web answer is written by Claude from the search results, and spoken as i
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("everyday answers use the quick model, and only hard talk the strong one", async () => {
+  const folder = mkdtempSync(joinPath(tmpdir(), "jarvis-fake-claude-"));
+  const fake = joinPath(folder, "claude");
+  writeFileSync(fake, "#!/bin/sh\necho \"$@\"\n", { mode: 0o755 });
+  assert.match((await askClaudeOnce("x", "y", fake)) ?? "", /--model claude-haiku-5-5 --effort low --tools/);
+  assert.match((await askClaudeOnce("x", "y", fake, undefined, "deep")) ?? "", /--model claude-sonnet-5-5 --tools/);
+  rmSync(folder, { recursive: true });
+  assert.equal(needsDeep("why is the sky blue"), false);
+  assert.equal(needsDeep("I accidentally deleted my thesis folder"), true);
+  assert.equal(needsDeep("line one\nline two"), true);
+
+  const tiers: (string | undefined)[] = [];
+  const jarvis = new Jarvis({ dryRun: true, thinker: async (_prompt, _onText, tier) => { tiers.push(tier); return "An answer, sir."; } });
+  await jarvis.handle("what's the capital of peru?");
+  await jarvis.handle("my laptop won't boot after the update, what should I do?");
+  assert.deepEqual(tiers, ["quick", "deep"]);
+});
+
+test("long lines in the talk are cut before going to Claude, oldest first past the limit", async () => {
+  const prompts: string[] = [];
+  const jarvis = new Jarvis({ dryRun: true, thinker: async (prompt) => { prompts.push(prompt); return "Noted, sir."; } });
+  jarvis.note("x".repeat(5000));
+  for (let at = 0; at < 20; at++) jarvis.note(`line ${at} ${"y".repeat(390)}`);
+  await jarvis.handle("what's the capital of peru?");
+  const sent = prompts[0];
+  assert.ok(!sent.includes("x".repeat(401)), "a long line went whole");
+  assert.ok(sent.includes("line 19"), "the newest line is missing");
+  assert.ok(!sent.includes("line 0 "), "the oldest line should have gone");
+  assert.ok(sent.length < 8000);
 });

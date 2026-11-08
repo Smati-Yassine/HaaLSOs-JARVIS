@@ -7,7 +7,14 @@ import { join } from "node:path";
 
 import { IDENTITY } from "./identity.ts";
 
-const CLAUDE_MODEL = "claude-sonnet-5-5";
+// Measured on Jarvis's real jobs (facts, sums, a trick question, advice, a web answer, a coding
+// report): Haiku at low effort got all six right at about a fortieth of Sonnet's cost, and as
+// fast. So it does the everyday answering, and Sonnet only the hard conversations.
+export type Tier = "quick" | "deep";
+const TIERS: Record<Tier, string[]> = {
+  quick: ["--model", "claude-haiku-5-5", "--effort", "low"],
+  deep: ["--model", "claude-sonnet-5-5"],
+};
 const TIME_LIMIT = 60_000;
 
 export const CLAUDE_VOICE = `You are Jarvis, the personal assistant running on the user's Linux computer, speaking like a calm, \
@@ -28,6 +35,9 @@ const WORKING_OUT = /^if\b|\bif (i|we|you|today|it|there|the)\b|\b(how (many|muc
 const A_PROBLEM = /\b(by mistake|by accident|accidentally|i broke|is broken|i lost|i'?m stuck|not working|doesn'?t work|won'?t (start|work|boot|open)|keeps crashing|i deleted|worried|scared|anxious|stressed|depressed|struggling|i can'?t figure)\b/i;
 
 // Greetings, thanks and remarks: nothing to look up and nothing to do.
+// Someone in trouble, or a long message, deserves the stronger model.
+export const needsDeep = (said: string) => A_PROBLEM.test(said) || said.trim().split(/\s+/).length >= 25 || said.includes("\n");
+
 export const isSmallTalk = (said: string) => SMALL_TALK.test(said.trim()) && !NEEDS_THOUGHT.test(said.trim()) && said.trim().split(/\s+/).length <= 12;
 
 // How much thinking this deserves. Plain rules decide, so it's instant and spends no plan usage
@@ -53,12 +63,12 @@ export function cleanEnv(): Record<string, string> {
 // Null means no answer: the plan limit, no network, or Claude missing. The caller falls back.
 // With onText, each piece of the answer is passed on as Claude writes it, so speaking can start
 // at the first sentence instead of waiting for the last.
-export function askClaudeOnce(prompt: string, system = CLAUDE_VOICE, file = "claude", onText?: (delta: string) => void): Promise<string | null> {
+export function askClaudeOnce(prompt: string, system = CLAUDE_VOICE, file = "claude", onText?: (delta: string) => void, tier: Tier = "quick"): Promise<string | null> {
   return new Promise((done) => {
     const folder = join(homedir(), ".Jarvis");
     const streaming = onText ? ["--output-format", "stream-json", "--include-partial-messages", "--verbose"] : [];
     const child = spawn(file, [
-      "-p", "--model", CLAUDE_MODEL, "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "", "--system-prompt", system, ...streaming,
+      "-p", ...TIERS[tier], "--tools", "", "--no-session-persistence", "--strict-mcp-config", "--setting-sources", "", "--system-prompt", system, ...streaming,
     ], { cwd: existsSync(folder) ? folder : homedir(), env: cleanEnv(), stdio: ["pipe", "pipe", "ignore"] });
     let output = "";
     let written = "";

@@ -44,7 +44,8 @@ export type Context = {
   projects?: () => string[];
   reminders?: Pick<Memory, "addReminder" | "reminders" | "clearReminders">;
   // Sends a question to Claude. Only the real app has this, so tests never spend plan usage.
-  thinker?: (prompt: string, onText?: (delta: string) => void) => Promise<string | null>;
+  // "deep" asks for the stronger, costlier model; everything else uses the quick one.
+  thinker?: (prompt: string, onText?: (delta: string) => void, tier?: "quick" | "deep") => Promise<string | null>;
   // Starts speaking an answer while it's still being written.
   speech?: () => { push: (delta: string) => void; end: () => void; spoke: boolean } | null;
   clipboard?: { read(): string | Promise<string>; write(text: string): void };

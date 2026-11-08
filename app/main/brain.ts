@@ -9,7 +9,7 @@ import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, t
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
 import { IDENTITY, identityAnswer } from "./identity.ts";
-import { askClaudeOnce, depthOf, isSmallTalk, type Depth } from "./thinker.ts";
+import { askClaudeOnce, depthOf, isSmallTalk, needsDeep, type Depth } from "./thinker.ts";
 import { findApp, runApproved, toolSchemas, TOOLS, type Context } from "./tools.ts";
 
 const OLLAMA = "http://localhost:11434/api/chat";
@@ -22,6 +22,9 @@ const commandLog = () => join(logDir(), "commands.jsonl");
 const LOG_DAYS = 30;
 // Lines of the conversation kept in mind. Claude is given all of them, so it follows the talk.
 const KEEP_TURNS = 30;
+// Characters of each line, and of the whole talk, sent along with a question to Claude.
+const LINE_LIMIT = 400;
+const TALK_LIMIT = 6000;
 
 const SYSTEM = `You are Jarvis, the user's personal assistant on his Linux computer. Address him as sir. \
 Keep spoken replies to one or two short sentences, with no emoji. Use a tool whenever the request is an action \
@@ -322,7 +325,7 @@ No code, file names, paths, lists, markdown or emoji. Don't add anything that is
 
 // Turns Claude's final message into a few spoken sentences. Claude itself does it best; the small
 // model, squeezing it into one sentence, lost what mattered, so it's only the fallback.
-export async function summarize(message: string, ask: (prompt: string, system: string) => Promise<string | null> = askClaudeOnce): Promise<string> {
+export async function summarize(message: string, ask: (prompt: string, system: string) => Promise<string | null> = (prompt, system) => askClaudeOnce(prompt, system)): Promise<string> {
   const fallback = message.split(/(?<=[.!?])\s/)[0]?.slice(0, 160) ?? "";
   if (message.length < 120) return speakable(message);
   const good = await ask(message.slice(0, 8000), REPORT).catch(() => null);
@@ -455,8 +458,15 @@ export class Jarvis {
   }
 
   // The prompt for a question sent to Claude: the recent talk, and what's known that applies.
+  // Long lines (file lists, clipboard, pasted text) are cut, since every word is sent again with
+  // each question. Recent lines matter most, so the oldest go first past the overall limit.
   private forClaude(said: string, context: string[]): string {
-    const talk = this.history.map((line) => `${line.role === "user" ? "He said" : "You said"}: ${line.content}`).join("\n");
+    const lines = this.history.map((line) => {
+      const text = line.content.length > LINE_LIMIT ? `${line.content.slice(0, LINE_LIMIT)}...` : line.content;
+      return `${line.role === "user" ? "He said" : "You said"}: ${text}`;
+    });
+    while (lines.join("\n").length > TALK_LIMIT) lines.shift();
+    const talk = lines.join("\n");
     return [...context, talk && `The conversation so far:\n${talk}`, `He now says: ${said}`].filter(Boolean).join("\n\n");
   }
 
@@ -775,7 +785,8 @@ Rewritten:`);
         const speech = this.ctx.speech?.();
         // When the answer is spoken as it comes, its first sentence is quicker than this would be.
         if (depth === "serious" && !speech) this.ctx.ack?.("One moment, sir.");
-        const best = await this.ctx.thinker(this.forClaude(words, context), speech?.push);
+        const tier = namedClaude || needsDeep(said) ? "deep" : "quick";
+        const best = await this.ctx.thinker(this.forClaude(words, context), speech?.push, tier);
         speech?.end();
         if (best) {
           const reply = this.finish(said, speakable(best), "model", begin, "claude_answer");
