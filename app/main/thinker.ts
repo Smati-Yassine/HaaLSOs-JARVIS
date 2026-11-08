@@ -7,12 +7,11 @@ import { join } from "node:path";
 
 import { IDENTITY } from "./identity.ts";
 
-// Measured on Jarvis's real jobs (facts, sums, a trick question, advice, a web answer, a coding
-// report): Haiku at low effort got all six right at about a fortieth of Sonnet's cost, and as
-// fast. So it does the everyday answering, and Sonnet only the hard conversations.
+// Everything uses Sonnet: he found Haiku's answers not good enough (2026-11-08). Everyday answers
+// run at low effort to stay quick; the hard conversations get Sonnet's normal effort.
 export type Tier = "quick" | "deep";
 const TIERS: Record<Tier, string[]> = {
-  quick: ["--model", "claude-haiku-5-5", "--effort", "low"],
+  quick: ["--model", "claude-sonnet-5-5", "--effort", "low"],
   deep: ["--model", "claude-sonnet-5-5"],
 };
 const TIME_LIMIT = 60_000;

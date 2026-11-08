@@ -1279,7 +1279,7 @@ test("everyday answers use the quick model, and only hard talk the strong one", 
   const folder = mkdtempSync(joinPath(tmpdir(), "jarvis-fake-claude-"));
   const fake = joinPath(folder, "claude");
   writeFileSync(fake, "#!/bin/sh\necho \"$@\"\n", { mode: 0o755 });
-  assert.match((await askClaudeOnce("x", "y", fake)) ?? "", /--model claude-haiku-5-5 --effort low --tools/);
+  assert.match((await askClaudeOnce("x", "y", fake)) ?? "", /--model claude-sonnet-5-5 --effort low --tools/);
   assert.match((await askClaudeOnce("x", "y", fake, undefined, "deep")) ?? "", /--model claude-sonnet-5-5 --tools/);
   rmSync(folder, { recursive: true });
   assert.equal(needsDeep("why is the sky blue"), false);
