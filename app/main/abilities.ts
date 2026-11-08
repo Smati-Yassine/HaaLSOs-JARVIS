@@ -116,11 +116,13 @@ export function abilityCall(text: string, now = new Date()): Call | null {
   const remind = (kind: string, due: number, words: string): Call => ({ tool: "set_reminder", args: { kind, due: String(due), text: words } });
 
   if (/^(what can you do|what are you able to do|what do you do|help|what are your (abilities|skills|capabilities))$/.test(lower)) return say(CAPABILITIES);
+  // "How does a screenshot work" and "why do timers drift" want an explanation, not the action.
+  const explaining = /^(how (do|does|did|is|are|can|could|would|should|to)|why|explain|what (is|are|does|do) (a|an)|what does|is it (safe|bad|ok|okay|normal)|tell me (about|how|why))\b/.test(lower);
 
   // ---- Timers, reminders, alarms
   if (/\b(cancel|stop|clear|delete|remove)\b.*\b(timers?|reminders?|alarms?)\b/.test(lower)) return { tool: "clear_reminders", args: {} };
   if (/\b(show|list|what|any|do i have|read)\b.*\b(timers?|reminders?|alarms?)\b/.test(lower) && !/\b(code|app|page|function)\b/.test(lower)) return { tool: "list_reminders", args: {} };
-  if (/\btimer\b/.test(lower) && !/\b(code|app|page|component|function|add|fix|build)\b/.test(lower)) {
+  if (!explaining && /\btimer\b/.test(lower) && !/\b(code|app|page|component|function|add|fix|build)\b/.test(lower)) {
     const seconds = parseDelay(lower);
     return seconds ? remind("timer", now.getTime() + seconds * 1000, describeLength(seconds)) : say("For how long, sir? Say something like a timer for five minutes.");
   }
@@ -157,15 +159,15 @@ export function abilityCall(text: string, now = new Date()): Call | null {
   if (new RegExp(`^lock( ${COMPUTER}| (?:the |my )?(?:screen|session))?$`).test(lower)) return { tool: "lock_screen", args: {} };
 
   // ---- Screen and radios
-  if (/\b(screenshot|screen ?shot|screen capture|capture (?:the |my )?screen)\b/.test(lower)) return { tool: "screenshot", args: {} };
-  if (/\bbrightness\b|\bscreen\b.*\b(brighter|dimmer|darker)\b|\b(brighten|dim)\b.*\bscreen\b/.test(lower) && !/\b(code|app|page)\b/.test(lower)) {
+  if (!explaining && /\b(screenshot|screen ?shot|screen capture|capture (?:the |my )?screen)\b/.test(lower)) return { tool: "screenshot", args: {} };
+  if (!explaining && /\bbrightness\b|\bscreen\b.*\b(brighter|dimmer|darker)\b|\b(brighten|dim)\b.*\bscreen\b/.test(lower) && !/\b(code|app|page)\b/.test(lower)) {
     const level = lower.match(/\b(\d{1,3})\b/)?.[1];
     if (level) return { tool: "brightness", args: { level } };
     if (/\b(up|brighter|brighten|increase|raise|more)\b/.test(lower)) return { tool: "brightness", args: { step: "20" } };
     if (/\b(down|dimmer|darker|dim|lower|decrease|less)\b/.test(lower)) return { tool: "brightness", args: { step: "-20" } };
     return say("What level, sir? Say something like brightness to forty.");
   }
-  if (/\b(wi-?fi|bluetooth)\b/.test(lower) && (match = lower.match(/\b(on|off|enable|disable)\b/)) && /^(turn|switch|enable|disable|wi-?fi|bluetooth)/.test(lower)) {
+  if (!explaining && /\b(wi-?fi|bluetooth)\b/.test(lower) && (match = lower.match(/\b(on|off|enable|disable)\b/)) && /^(turn|switch|enable|disable|wi-?fi|bluetooth)/.test(lower)) {
     return { tool: "radio", args: { what: lower.includes("bluetooth") ? "bluetooth" : "wifi", on: String(match[1] === "on" || match[1] === "enable") } };
   }
   if ((match = lower.match(/^(?:(?:switch|change|go|turn)(?: on)?(?: to)? |enable |use |set (?:the )?(?:theme|computer|desktop) to )?(?:the )?(dark|light)(?: mode| theme)$/))) return { tool: "color_scheme", args: { mode: match[1] } };

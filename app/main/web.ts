@@ -62,11 +62,18 @@ ${sources}
 Question: ${question}`;
 }
 
-export async function webAnswer(question: string, model: string): Promise<string | null> {
+// The top results for a question, or null if the search engine isn't answering.
+export async function searchWeb(question: string): Promise<WebResult[] | null> {
   const url = `http://127.0.0.1:${PORT}/search?format=json&q=${encodeURIComponent(question)}`;
   const found = await fetch(url, { signal: AbortSignal.timeout(10_000) });
   if (!found.ok) return null;
-  const results = topResults((await found.json()) as { results?: Partial<WebResult>[] });
+  return topResults((await found.json()) as { results?: Partial<WebResult>[] });
+}
+
+// The small local model's reading of the results, for when Claude can't be reached.
+export async function webAnswer(question: string, model: string, results?: WebResult[]): Promise<string | null> {
+  results ??= (await searchWeb(question)) ?? undefined;
+  if (!results) return null;
   if (!results.length) return "";
   const reply = await fetch("http://localhost:11434/api/chat", {
     method: "POST",

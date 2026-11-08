@@ -27,6 +27,10 @@ VOICE_RATE = 24000
 VOICE_THREADS = 6  # ONNX Runtime's default was about 6x slower on this hybrid CPU.
 
 WAKE_THRESHOLD = 0.5
+# While Jarvis talks, the microphone hears him too. His voice saying "I'm Jarvis" scored 0.91 on
+# the wake word, so his own name never wakes him, and other echoes need a surer match.
+WAKE_WHILE_SPEAKING = 0.7
+OWN_NAME_QUIET = 1.0  # Seconds after saying his name, while it still echoes and the player drains.
 SPEECH_THRESHOLD = 0.5
 END_SILENCE = 0.7  # Seconds of quiet that end a command.
 NUDGE_AFTER = 1.2  # Quiet this long after the wake word: Jarvis says "Yes, sir?"
@@ -70,6 +74,8 @@ class Mouth:
         self.player = None
         self.lock = threading.Lock()
         self.busy = threading.Event()
+        self.naming = False
+        self.name_quiet_until = 0.0
         self.cache = {}
         for phrase in COMMON:
             self.cache[phrase] = self._synth(phrase)
@@ -92,6 +98,10 @@ class Mouth:
             self.pending += 1
             self.busy.set()
             self.jobs.put((self.generation, text, then_listen, more, tag))
+
+    def saying_own_name(self):
+        """True while a sentence with "Jarvis" in it is playing, and just after."""
+        return self.naming or time.perf_counter() < self.name_quiet_until
 
     def stop(self):
         """Interrupted: drop everything queued and cut the current sound."""
@@ -151,7 +161,12 @@ class Mouth:
                     speaking = True
                     emit("speaking", active=True, first_audio_ms=round((time.perf_counter() - item[3]) * 1000))
                 emit("saying", text=item[4], seconds=round(len(item[2]) / VOICE_RATE, 2), tag=item[5])
+                named = "jarvis" in item[4].lower()
+                self.naming = named
                 self._play(item[2])
+                self.naming = False
+                if named:
+                    self.name_quiet_until = time.perf_counter() + OWN_NAME_QUIET
                 continue
             _, _, then_listen, more, tag = item
             if not current:
@@ -367,8 +382,12 @@ class Daemon:
 
                 score = self.ears.wake_score(frame)
                 follow_up = self.follow_up.is_set() and not self.mouth.busy.is_set()
-                if score < WAKE_THRESHOLD and not follow_up:
-                    continue
+                speaking = self.mouth.busy.is_set()
+                if not follow_up:
+                    if score < (WAKE_WHILE_SPEAKING if speaking else WAKE_THRESHOLD):
+                        continue
+                    if self.mouth.saying_own_name():
+                        continue
                 if follow_up:
                     self.follow_up.clear()
                 else:

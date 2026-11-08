@@ -8,13 +8,13 @@ import { DatabaseSync } from "node:sqlite";
 
 import { askClaudeOnce, depthOf } from "./thinker.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
-import { summarize, isHesitation, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
+import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
 import { claudeAction, fastPath, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
 import { classify, classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
-import { findArgs, inYourWords, rankFiles, reminderMessage, describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
+import { TOOLS, findArgs, inYourWords, rankFiles, reminderMessage, describeFolder, describeSize, findApp, googleUrl, homeCity, projectSummary, runApproved, weatherSentence, websiteUrl } from "./tools.ts";
 import { SpeechStream, spokenForm } from "./voice.ts";
 import { identityAnswer } from "./identity.ts";
 import { answerPrompt, siteName, topResults } from "./web.ts";
@@ -1200,4 +1200,68 @@ test("Claude's resume question is recognized, with what continuing costs", () =>
   assert.deepEqual(resumeCost(screen), { asked: true, cost: "7% of your 5-hour limit" });
   assert.deepEqual(resumeCost("Resumethisconversation?1.Resume"), { asked: true, cost: null });
   assert.deepEqual(resumeCost("Noquestionhere"), { asked: false, cost: null });
+});
+
+test("talk about the weather or a past deed isn't a request for it", () => {
+  assert.equal(fastPath("the weather was lovely yesterday"), null);
+  assert.equal(fastPath("what was the weather like yesterday")?.tool, "get_weather");
+  assert.deepEqual(fastPath("how cold is it in Paris"), { tool: "get_weather", args: { location: "Paris" } });
+  assert.deepEqual(fastPath("is it going to rain tomorrow"), { tool: "get_weather", args: { when: "tomorrow" } });
+  assert.equal(isPastNarration("I took a screenshot of my exam results"), true);
+  assert.equal(isPastNarration("I set a timer but forgot why"), true);
+  assert.equal(isPastNarration("I need a timer for five minutes"), false);
+  assert.equal(isPastNarration("take a screenshot"), false);
+});
+
+test("explaining something isn't doing it", () => {
+  assert.equal(abilityCall("how does a screenshot work"), null);
+  assert.equal(abilityCall("why do timers drift"), null);
+  assert.equal(abilityCall("what is bluetooth"), null);
+  assert.equal(abilityCall("take a screenshot")?.tool, "screenshot");
+  assert.equal(abilityCall("turn off bluetooth")?.tool, "radio");
+});
+
+test("the sound goes up, down, or to a number with just 'it'", () => {
+  assert.deepEqual(fastPath("turn it down to 20"), { tool: "set_volume", args: { level: "20" } });
+  assert.deepEqual(fastPath("put it at 70%"), { tool: "set_volume", args: { level: "70" } });
+  assert.deepEqual(fastPath("turn it up"), { tool: "set_volume", args: { level: "up" } });
+  assert.deepEqual(fastPath("louder"), { tool: "set_volume", args: { level: "up" } });
+  assert.deepEqual(fastPath("volume down a bit"), { tool: "set_volume", args: { level: "down" } });
+  assert.equal(fastPath("turn it into a function"), null);
+});
+
+test("a window can be brought to the front, and the weekday asked", () => {
+  assert.deepEqual(fastPath("put firefox in front"), { tool: "window_control", args: { action: "focus", name: "firefox" } });
+  assert.deepEqual(fastPath("bring the terminal window to the front"), { tool: "window_control", args: { action: "focus", name: "terminal" } });
+  assert.equal(fastPath("what day of the week is it")?.tool, "get_time");
+});
+
+test("live questions aren't sent to Claude without the web", () => {
+  for (const said of ["how did the lakers do last night", "what's the euro to dollar rate", "how cold is it", "who won the derby"]) assert.equal(isPlainQuestion(said), false, said);
+  assert.equal(isPlainQuestion("what's the capital of australia"), true);
+});
+
+test("a web answer is written by Claude from the search results, and spoken as it comes", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ results: [{ title: "Final", url: "https://uefa.com/a", content: "Paris Saint-Germain beat Arsenal on penalties." }] }))) as typeof fetch;
+  try {
+    let prompt = "";
+    const spoken: string[] = [];
+    const speech = new SpeechStream((text) => text && spoken.push(text));
+    const ctx = {
+      dryRun: false,
+      speech: () => speech,
+      thinker: async (asked: string, onText?: (delta: string) => void) => { prompt = asked; onText?.("**Paris** won it, sir. "); return "**Paris** won it, sir."; },
+    };
+    const result = await TOOLS.web_answer.run({ question: "who won the final" }, ctx);
+    assert.equal(result.say, "Paris won it, sir.");
+    assert.equal(result.spoken, "");
+    assert.deepEqual(spoken, ["Paris won it, sir."]);
+    assert.match(prompt, /untrusted web text[\s\S]*Paris Saint-Germain beat Arsenal/);
+    // Without Claude, the small model reads the same results.
+    globalThis.fetch = (async (url: string) => new Response(JSON.stringify(String(url).includes("11434") ? { message: { content: "Paris won, sir." } } : { results: [{ title: "t", url: "https://a.b", content: "Paris won." }] }))) as typeof fetch;
+    assert.equal((await TOOLS.web_answer.run({ question: "who won" }, { dryRun: false, thinker: async () => null })).say, "Paris won, sir.");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

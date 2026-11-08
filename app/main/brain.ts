@@ -198,7 +198,7 @@ async function chatReply(history: Message[], context: string[], temperature: num
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: deep ? DEEP_MODEL : MODEL, stream: false, think: false, keep_alive: -1,
+      model: deep ? DEEP_MODEL : MODEL, stream: false, think: false, keep_alive: deep ? "10m" : -1,
       options: { temperature, num_ctx: 4096, num_predict: 120, ...(deep ? { num_gpu: 0 } : {}) },
       messages: deep
         ? [{ role: "system", content: [REASON, ...context].join("\n\n") }, ...history]
@@ -247,6 +247,11 @@ export const isStatementAboutSelf = (said: string) => {
   return /^(i|i'm|im|i am|i've|i was|i just|my)\b/i.test(text) && !/\b(need|want|wanna|would like|'d like|let me|let's|please|finished|done|can you|could you)\b/i.test(text);
 };
 
+// "I took a screenshot of my results" and "I set a timer but forgot why" tell a story about
+// something already done. The action words in them aren't requests.
+const PAST_DEED = /\b(took|set|opened|closed|turned|played|watched|made|had|did|tried|used|forgot|saw|heard|bought|lost|broke|deleted|installed|found|got|was|were)\b/i;
+export const isPastNarration = (said: string) => isStatementAboutSelf(said) && /^(i|i've|i just|i already|i was|i had|i once|my)\b/i.test(clean(said)) && PAST_DEED.test(clean(said));
+
 // "Okay, uh" is someone still thinking, not a request.
 const HESITATION = /\b(uh+|um+|umm+|hm+|er+m?|ah+|mm+)\b/i;
 export const isHesitation = (said: string) => HESITATION.test(said) && clean(said).split(/[\s,.!?…-]+/).filter(Boolean).every((word) => HESITATION.test(word) || /^(ok|okay|so|well|yeah|oh|like|and|but|wait|sir)$/i.test(word));
@@ -266,7 +271,7 @@ export const isMessageForClaude = (said: string) => {
 // nothing on the computer and nothing to do. These skip choosing an action, which saves about a
 // second, and go straight to whoever answers. Anything doubtful still goes through the model.
 const QUESTION_START = /^(who|what|what's|whats|why|how|when|where|which|explain|define|is|are|was|were|does|did|do|can|could|should|would|tell me (about|why|how|what))\b/i;
-const NOT_PLAIN = /\b(today|tonight|tomorrow|yesterday|now|right now|currently|current|latest|recent|recently|this (morning|week|month|year|weekend)|next (week|month)|20\d\d|news|headlines|score|price|cost|weather|forecast|temperature|time|date|day is|open|close|launch|play|pause|volume|mute|battery|wi-?fi|internet|connected|disk|storage|cpu|ram|memory|running|installed|file|files|folder|download|downloads|clipboard|window|screen|remind|reminder|timer|alarm|remember|forget|note|project|code|coding|claude|search|google|look up|website|app|my (computer|laptop|pc|desktop|system))\b/i;
+const NOT_PLAIN = /\b(today|tonight|tomorrow|yesterday|now|right now|currently|current|latest|recent|recently|this (morning|week|month|year|weekend)|next (week|month)|20\d\d|news|headlines|score|scores|last night|last week|last weekend|this season|win|won|lose|lost|beat|price|cost|rate|exchange|stocks?|weather|forecast|temperature|cold|hot|warm|rain|raining|snow|snowing|sunny|umbrella|day of the week|time|date|day is|open|close|launch|play|pause|volume|mute|battery|wi-?fi|internet|connected|disk|storage|cpu|ram|memory|running|installed|file|files|folder|download|downloads|clipboard|window|screen|remind|reminder|timer|alarm|remember|forget|note|project|code|coding|claude|search|google|look up|website|app|my (computer|laptop|pc|desktop|system))\b/i;
 export const isPlainQuestion = (said: string) => {
   const text = clean(said);
   return QUESTION_START.test(text) && !NOT_PLAIN.test(text) && !said.includes("\n") && depthOf(text) !== "small";
@@ -383,9 +388,9 @@ export class Jarvis {
 
   async warmUp() {
     await askModel([{ role: "user", content: "hello" }]);
+    // Not loaded now: Claude answers questions, so the big model only covers when Claude can't,
+    // and keeping it loaded would hold about 6 GB of memory all day for that.
     this.deepReady = await deepModelInstalled();
-    // Loads in the background, so the first real question doesn't wait for it.
-    if (this.deepReady) void chatReply([{ role: "user", content: "hello" }], [], 0, true).catch(() => {});
   }
 
   // ---- Conversations -------------------------------------------------------
@@ -655,7 +660,8 @@ Rewritten:`);
       return { ...this.finish(said, "What shall we call it, sir?", "fast", begin), listen: true };
     }
     // These rules are exact, so they come before anything that has to guess.
-    const ability = abilityCall(clean(said));
+    const narration = isPastNarration(said);
+    const ability = narration ? null : abilityCall(clean(said));
     if (ability) return this.runTool(ability, "fast", said, begin);
 
     const projects = this.projectNames();
@@ -740,7 +746,7 @@ Rewritten:`);
 
     if (looksLikeCoding(said, Boolean(this.ctx.claude?.openProject))) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
 
-    const quick = fastPath(said);
+    const quick = narration ? null : fastPath(said);
     // "Start working with it" isn't an app. Only a program that really exists opens directly.
     if (quick && !(quick.tool === "open_app" && !this.ctx.dryRun && !findApp(quick.args.name))) {
       return this.runTool(quick, "fast", said, begin);

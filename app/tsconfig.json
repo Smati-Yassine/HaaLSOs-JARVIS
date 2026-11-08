@@ -1,0 +1,16 @@
+{
+  // Only checks types: electron-vite builds the app, and Node runs main/ directly for tests.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "jsx": "react-jsx",
+    "skipLibCheck": true,
+    "types": ["node", "vite/client"]
+  },
+  "include": ["main", "preload", "jarvis-window"]
+}

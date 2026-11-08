@@ -38,7 +38,7 @@ export function fastPath(said: string): Call | null {
   if (ability) return ability;
 
   if (/^(what('s| is) the time|what time is it|time|the time)$/.test(lower)) return { tool: "get_time", args: {} };
-  if (/^(what('s| is) (the date|today'?s date)|what day is it)$/.test(lower)) {
+  if (/^(what('s| is) (the date|today'?s date|the day( today)?)|what day( of the week)? is (it|today)( today)?|what'?s today)$/.test(lower)) {
     return { tool: "get_time", args: { want: "date" } };
   }
 
@@ -52,7 +52,11 @@ export function fastPath(said: string): Call | null {
 
   // Saying "google" always means Brave, even for the weather.
   const wantsSearch = /^google\b/.test(lower);
-  if (!wantsSearch && /\b(weather|forecast|temperature)\b/.test(lower) && !/\b(code|project|app|page|api|component|add|fix|build)\b/.test(lower)) {
+  // "The weather was lovely yesterday" is talk, not a request for the forecast.
+  const pastWeather = /\b(was|were|yesterday|last (night|week))\b/.test(lower) && !/^(what|how|was|will|is)\b/.test(lower);
+  // "How cold is it in Paris", "will it rain tomorrow", "do I need an umbrella".
+  const skyQuestion = /^(how (cold|hot|warm|chilly) (is it|will it be)|(is|will) it (going to )?(rain|snow|be (cold|hot|warm|sunny|windy|nice))|is it (raining|snowing|sunny|windy)|do i need an? (umbrella|coat|jacket))\b/.test(lower);
+  if (!wantsSearch && !pastWeather && (skyQuestion || /\b(weather|forecast|temperature)\b/.test(lower)) && !/\b(code|project|app|page|api|component|add|fix|build)\b/.test(lower)) {
     const place = text.match(/\b(?:in|for|at)\s+([\p{L}][\p{L} '-]*?)(?:\s+(?:today|tomorrow|right now|now))?$/iu)?.[1];
     const args: Record<string, string> = /\btomorrow\b/.test(lower) ? { when: "tomorrow" } : {};
     if (place && !/^(the|my|this)\b/i.test(place)) args.location = place;
@@ -63,6 +67,15 @@ export function fastPath(said: string): Call | null {
   if ((match = lower.match(/^(?:set |turn )?(?:the )?volume(?: up| down)?(?: to| at)? (.+?)(?: percent|%)?$/))) {
     const level = volumeLevel(match[1]);
     if (level) return { tool: "set_volume", args: { level } };
+  }
+  // "Turn it down to 20", "put it at 70%": with a number, "it" can only be the sound.
+  if ((match = lower.match(/^(?:turn|put|set|bring)\s+(?:it|the (?:sound|music|audio))(?: up| down)?(?: to| at)? (\d{1,3}|[a-z]+(?: hundred)?)(?: percent|%)?$/))) {
+    const level = volumeLevel(match[1]);
+    if (level) return { tool: "set_volume", args: { level } };
+  }
+  if ((match = lower.match(/^(?:turn (?:it|the (?:sound|volume|music|audio)) (up|down)|(?:volume|sound) (up|down)|(louder|quieter|softer))(?: a (?:bit|little|touch))?$/))) {
+    const word = match[1] ?? match[2] ?? match[3];
+    return { tool: "set_volume", args: { level: word === "up" || word === "louder" ? "up" : "down" } };
   }
 
   if (/^(pause|stop)( the)?( music| song| video)?$/.test(lower)) return { tool: "media_control", args: { action: "pause" } };
@@ -99,6 +112,9 @@ export function fastPath(said: string): Call | null {
   }
   if ((match = lower.match(/^(minimi[sz]e|maximi[sz]e|focus)\s+(?:the\s+)?(.+)$/))) {
     return { tool: "window_control", args: { action: match[1], name: match[2] } };
+  }
+  if ((match = lower.match(/^(?:bring|put|get|move)\s+(?:the\s+)?(.+?)(?:\s+window)?\s+(?:in front|to the front|to front|up front|forward|on top)$/))) {
+    return { tool: "window_control", args: { action: "focus", name: match[1] } };
   }
   if (/\bbattery\b/.test(lower) && /^(how|what|check|battery)/.test(lower)) {
     return { tool: "system_info", args: { what: "battery" } };

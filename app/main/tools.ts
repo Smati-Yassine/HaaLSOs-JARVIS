@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import type { Memory } from "./memory.ts";
 import { findProject, listProjects, PROJECTS_ROOT, validProjectName } from "./projects.ts";
 import { classify, type Level } from "./safety.ts";
-import { webAnswer } from "./web.ts";
+import { answerPrompt, searchWeb, webAnswer } from "./web.ts";
 import { controlWindow, knownAction, listWindows, NOT_INSTALLED, pickWindow } from "./windows.ts";
 
 const run = promisify(execFile);
@@ -243,9 +243,19 @@ async function askWeb(args: Args, ctx: Context): Promise<Result> {
   if (ctx.dryRun) return { ok: true, say: `Looking up ${question}, sir.` };
   ctx.ack?.("Let me check, sir.");
   try {
-    const answer = await webAnswer(question, "qwen3.5:2b");
-    if (answer === null) return { ok: false, say: "My web search isn't responding, sir." };
-    return { ok: true, say: answer || `I couldn't find anything on that, sir.` };
+    const results = await searchWeb(question);
+    if (results === null) return { ok: false, say: "My web search isn't responding, sir." };
+    if (!results.length) return { ok: true, say: "I couldn't find anything on that, sir." };
+    // Claude reads the results far more accurately than the small model, and with no tools, so
+    // a web page can only change the words of the answer. It's spoken as it's written.
+    if (ctx.thinker) {
+      const speech = ctx.speech?.();
+      const best = await ctx.thinker(answerPrompt(question, results), speech?.push).catch(() => null);
+      speech?.end();
+      if (best) return { ok: true, say: best.replace(/\*\*?|`/g, "").trim(), spoken: speech?.spoke ? "" : undefined };
+    }
+    const answer = await webAnswer(question, "qwen3.5:2b", results);
+    return { ok: true, say: answer || "I couldn't find anything on that, sir." };
   } catch {
     return { ok: false, say: "My web search isn't running right now, sir. Say google if you want it in Brave." };
   }
@@ -260,6 +270,11 @@ async function setVolume(args: Args, ctx: Context): Promise<Result> {
   if (level === "mute" || level === "unmute") {
     if (!ctx.dryRun) await run("wpctl", ["set-mute", SINK, level === "mute" ? "1" : "0"]);
     return { ok: true, say: level === "mute" ? "Muted, sir." : "Sound is back on, sir." };
+  }
+  // A step from wherever it is now. The cap keeps it from going past full, which distorts.
+  if (level === "up" || level === "down") {
+    if (!ctx.dryRun) await run("wpctl", ["set-volume", "-l", "1.0", SINK, level === "up" ? "10%+" : "10%-"]);
+    return { ok: true, say: level === "up" ? "Louder, sir." : "Quieter, sir." };
   }
   const value = Number(level.replace("%", ""));
   if (!Number.isFinite(value) || value < 0 || value > 100) {
@@ -653,7 +668,7 @@ export const TOOLS: Record<string, Tool> = {
   },
   set_volume: {
     description: "Set the system volume.",
-    params: { level: "Volume from 0 to 100, or mute or unmute" },
+    params: { level: "Volume from 0 to 100, or up, down, mute or unmute" },
     run: setVolume,
   },
   media_control: {
