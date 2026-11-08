@@ -8,6 +8,7 @@ import { claudeAction, clean, fastPath, FIX_IT, isComputerComplaint, isComputerF
 import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
+import { parseUnderstanding, UNDERSTAND, understandPrompt } from "./understand.ts";
 import { approvalTitle, doneMessage, judge, packagesExist, parsePlan, PLANNER, systemFacts, withPkexec } from "./computer.ts";
 import { IDENTITY, identityAnswer } from "./identity.ts";
 import { askClaudeOnce, depthOf, isSmallTalk, needsDeep, type Depth } from "./thinker.ts";
@@ -258,6 +259,8 @@ export const isMessageForClaude = (said: string) => {
 const QUESTION_START = /^(who|what|what's|whats|why|how|when|where|which|explain|define|is|are|was|were|does|did|do|can|could|should|would|tell me (about|why|how|what))\b/i;
 const NOT_PLAIN = /\b(today|tonight|tomorrow|yesterday|now|right now|currently|current|latest|recent|recently|this (morning|week|month|year|weekend)|next (week|month)|20\d\d|news|headlines|score|scores|last night|last week|last weekend|this season|win|won|lose|lost|beat|price|cost|rate|exchange|stocks?|weather|forecast|temperature|cold|hot|warm|rain|raining|snow|snowing|sunny|umbrella|day of the week|time|date|day is|open|close|launch|play|pause|volume|mute|battery|wi-?fi|internet|connected|disk|storage|cpu|ram|memory|running|installed|file|files|folder|download|downloads|clipboard|window|screen|remind|reminder|timer|alarm|remember|forget|note|project|code|coding|claude|search|google|look up|website|app|space|port|process|my (computer|laptop|pc|desktop|system|videos|music|pictures|photos|documents|downloads|home folder|disk|drive|files|apps|programs|network|screen))\b/i;
 export const isPlainQuestion = (said: string) => {
+  // "Could you put some music on" is a request, worded politely.
+  if (/^(?:(?:hey )?jarvis,?\s+)?(can|could|would|will) (you|u)\b/i.test(said.trim())) return false;
   const text = clean(said);
   return QUESTION_START.test(text) && !NOT_PLAIN.test(text) && !said.includes("\n") && depthOf(text) !== "small";
 };
@@ -584,9 +587,22 @@ Rewritten:`);
     return this.askFirst({ command, level: plan.level, title: approvalTitle(plan), background: true }, source, "small_job", begin);
   }
 
+  // Claude's rewrite of his words as a command Jarvis knows. Null: not a request. Undefined:
+  // Claude couldn't be asked, so the small model guesses instead.
+  private async understand(said: string): Promise<string | null | undefined> {
+    const talk = this.history.slice(-4).map((line) => `${line.role === "user" ? "He said" : "Jarvis said"}: ${line.content.slice(0, 300)}`);
+    const reply = await this.ctx.thinker!(understandPrompt(said, this.projectNames(), this.ctx.claude?.openProject ?? null, talk), undefined, "quick", UNDERSTAND).catch(() => null);
+    if (reply === null) return undefined;
+    const command = parseUnderstanding(reply);
+    log({ said, understood: command });
+    return command && command.toLowerCase() !== clean(said).toLowerCase() ? command : null;
+  }
+
   // A job on the computer itself: one checked command if that's enough, otherwise Claude, in the
   // home folder or, with a project open, in that session, told it's about the computer.
   private async computerJob(said: string, begin: number): Promise<Reply> {
+    const secret = this.keepsSecret(said, begin);
+    if (secret) return secret;
     const task = this.withContext(said);
     const small = await this.planSmallJob(task, "fast", begin);
     if (small) return small;
@@ -601,7 +617,15 @@ Rewritten:`);
     return reply;
   }
 
+  // Passwords and keys never leave the computer, and every way of handing work to Claude would send them.
+  private keepsSecret(said: string, begin: number): Reply | null {
+    if (!containsSecret(said)) return null;
+    return this.finish(said, "That mentions a password or key, sir, so I'll keep it on this computer. That one is best done yourself.", "fast", begin);
+  }
+
   private async handToClaude(said: string, source: Reply["source"], begin: number): Promise<Reply> {
+    const secret = this.keepsSecret(said, begin);
+    if (secret) return secret;
     const small = await this.planSmallJob(said, source, begin);
     if (small) return small;
     const claude = this.ctx.claude!;
@@ -668,10 +692,12 @@ Rewritten:`);
     return reply;
   }
 
-  private async respond(original: string): Promise<Reply> {
+  // "rewritten": these are Claude's words for what he meant, so if they still aren't an action,
+  // nothing more is tried here: no second guess, and no answer to words he didn't say.
+  private async respond(original: string, rewritten = false): Promise<Reply> {
     const { rest: said, askedAfterHim } = splitGreeting(original);
     if (said !== original) {
-      const reply = await this.respond(said);
+      const reply = await this.respond(said, rewritten);
       return askedAfterHim ? { ...reply, say: `Very well. ${reply.say}`, spoken: reply.spoken ? `Very well. ${reply.spoken}` : undefined } : reply;
     }
     const begin = Date.now();
@@ -846,7 +872,22 @@ Rewritten:`);
       // repeats old actions: "yes" once re-ran a search. Actions then need their words present.
       // With nothing open, "ask claude about Rome" is a question. "Ask claude to fix it" is still a task.
       const namedClaude = !this.ctx.claude?.openProject && /^ask claude\s+(about|if|whether|what|why|how|who|when|where|which|is|are|should|can)\b/i.test(clean(said));
-      const { call } = isStatementAboutSelf(said) || namedClaude || plain || this.complaint ? { call: null } : await askModel([{ role: "user", content: asked }], notes);
+      const mayAct = !(isStatementAboutSelf(said) || namedClaude || plain || this.complaint);
+      if (rewritten) return { say: "", source: "model", ms: Date.now() - begin };
+      // Claude works out what casual or misheard words meant, far better than the small model,
+      // which once opened Firefox for "get me into the luminelle stuff". The small model stays as
+      // the fallback when Claude can't be reached.
+      // Anything with a secret in it never leaves the computer, so only the small model sees it.
+      // A question is rarely a command (the ones that are, like the weather, have exact rules), so
+      // it isn't worth a call to Claude to check. A polite "could you..." is a request, though.
+      const polite = /^(?:(?:hey )?jarvis,?\s+)?(can|could|would|will) (you|u)\b/i.test(said.trim());
+      const questionShaped = !polite && (/\?\s*$/.test(said) || /^(who|what|what's|whats|why|how|when|where|which|is|are|was|were|does|did|do|if|should|tell me)\b/i.test(clean(said)));
+      const understood = mayAct && !questionShaped && this.ctx.thinker && !containsSecret(said) ? await this.understand(said) : undefined;
+      if (understood) {
+        const reply = await this.respond(understood, true);
+        if ((reply.tool && reply.tool !== "claude_answer") || reply.pending) return reply;
+      }
+      const { call } = mayAct && understood === undefined ? await askModel([{ role: "user", content: asked }], notes) : { call: null };
       if (call && toolFitsWords(call.tool, asked)) return this.runTool(call, "model", said, begin, asked);
       const words = namedClaude ? clean(said).replace(/^ask claude\s+(?:about\s+|if\s+|whether\s+)?/i, "") : clean(said);
       const context = this.context(said, notes);

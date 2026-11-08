@@ -102,7 +102,9 @@ export const HARD: [string, string | string[] | null][] = [
 
 // Stand-ins for Claude, so routing matches the real app without spending plan usage.
 const claude = { openProject: null, start() {}, ask: () => true, close() {} };
-const app = () => ({ dryRun: true, claude, thinker: async () => "A stand-in answer, sir." });
+// Jobs with their own instructions (understanding, planning) get no answer, as when Claude can't be
+// reached, so this measures the rules and the small model. bench/heldout_phrases.ts --live uses Claude.
+const app = () => ({ dryRun: true, claude, thinker: async (_p: string, _o?: unknown, _t?: unknown, system?: string) => (system ? null : "A stand-in answer, sir.") });
 const TALK = new Set([null, "claude_answer"]);
 
 const fails = process.argv.includes("--fails");

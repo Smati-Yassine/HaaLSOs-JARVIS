@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import headless from "@xterm/headless";
 
 import { askClaudeOnce, depthOf, needsDeep } from "./thinker.ts";
+import { parseUnderstanding, understandPrompt } from "./understand.ts";
 import { approvalTitle, judge, packagesExist, parsePlan, withPkexec } from "./computer.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
@@ -1486,4 +1487,38 @@ test("a complaint gets advice, then 'fix it' sends Claude with the complaint, in
     // "Fix it" without a complaint before it isn't a computer job.
     assert.notEqual((await jarvis.handle("fix it")).tool, "claude_task");
   }
+});
+
+test("casual words are rewritten by Claude into a command, which then goes the normal way", async () => {
+  assert.equal(parseUnderstanding("start coding HaaLSO's JARVIS"), "start coding HaaLSO's JARVIS");
+  assert.equal(parseUnderstanding('"take a screenshot."'), "take a screenshot");
+  assert.equal(parseUnderstanding("NONE"), null);
+  assert.equal(parseUnderstanding("start coding <exact project name from the list>"), null);
+  assert.match(understandPrompt("i want to travaille on jarvis", ["HaaLSO's JARVIS", "luminelle"], null, []), /His projects: HaaLSO's JARVIS, luminelle\.[\s\S]*He says: i want to travaille on jarvis/);
+
+  const started: string[] = [];
+  const claude = { openProject: null as string | null, start: (project: string) => { started.push(project); }, close() {}, ask: () => true };
+  const rewrites: Record<string, string> = { "i want to travaille on jarvis": "start coding HaaLSO's JARVIS", "fais une capture d'ecran": "take a screenshot", "shut it all down for good": "shut down the computer", "i had a long day": "NONE" };
+  const calls: string[] = [];
+  const thinker = async (prompt: string, _on?: unknown, _tier?: unknown, system?: string) => {
+    calls.push(system ? "understand" : "answer");
+    if (!system) return "Rest well, sir.";
+    return rewrites[prompt.match(/He says: (.+)$/)![1]] ?? "NONE";
+  };
+  const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["HaaLSO's JARVIS", "luminelle"], thinker });
+  assert.equal((await jarvis.handle("i want to travaille on jarvis")).say, "Opening Claude in HaaLSO's JARVIS, sir.");
+  assert.deepEqual(started, ["HaaLSO's JARVIS"]);
+  const dry = new Jarvis({ dryRun: true, claude, projects: () => [], thinker });
+  assert.equal((await dry.handle("fais une capture d'ecran")).tool, "screenshot");
+  // Rewritten words still get every safety question: shutting down asks first.
+  const power = await dry.handle("shut it all down for good");
+  assert.ok(power.pending, "a rewritten power request must still ask");
+  // Not a request: no action, and it's answered once.
+  calls.length = 0;
+  assert.notEqual((await dry.handle("tell me something, i had a long day")).tool, "screenshot");
+  // Questions and secrets are never sent to be understood.
+  calls.length = 0;
+  await dry.handle("why is the sky blue");
+  await dry.handle("put my password in the notes");
+  assert.ok(!calls.includes("understand"), calls.join());
 });

@@ -27,7 +27,14 @@ const C: [string, string[] | null][] = [
   ["what's the meaning of life", null], ["how far is the moon", null],
 ];
 const claude = { openProject: null, start() {}, ask: () => true, close() {} };
-const app = () => ({ dryRun: true, claude, thinker: async () => "stand-in" });
+const { askClaudeOnce } = await import("../app/main/thinker.ts");
+// --live sends casual words to Claude to be understood, as the app does. Otherwise Claude is
+// treated as unreachable for those jobs, which measures the rules and the small model alone.
+const live = process.argv.includes("--live");
+const app = () => ({
+  dryRun: true, claude,
+  thinker: async (p: string, o?: (d: string) => void, t?: "quick" | "deep", system?: string) => (system ? (live ? askClaudeOnce(p, system, "claude", o, t) : null) : "stand-in"),
+});
 await new Jarvis(app()).warmUp();
 let ok = 0;
 for (const [said, want] of C) {

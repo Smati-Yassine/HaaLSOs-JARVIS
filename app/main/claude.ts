@@ -127,6 +127,8 @@ export const MODELS = [
   { id: "claude-haiku-5-5", label: "Haiku 5.5" },
 ];
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+export const DEFAULT_MODEL = "claude-opus-5-5";
+export const DEFAULT_EFFORT = "medium";
 
 // Claude Code runs this for every hook and status update. It only informs Jarvis and never
 // answers, so Claude's own prompts and menus always appear on its screen.
@@ -722,8 +724,11 @@ export class ClaudeManager {
   private launchClaude(session: Session, resume: boolean) {
     const args = ["--permission-mode", this.bypass ? "bypassPermissions" : "default", "--settings", SETTINGS, "--append-system-prompt", JARVIS_NOTE];
     args.push(...(resume ? ["--resume", session.id] : ["--session-id", session.id]));
-    if (session.model) args.push("--model", session.model);
-    if (session.effort) args.push("--effort", session.effort);
+    // His choice for coding unless he picks another in the panel: set per session on the command
+    // line, so his global Claude Code settings are never touched.
+    session.model ??= DEFAULT_MODEL;
+    session.effort ??= DEFAULT_EFFORT;
+    args.push("--model", session.model, "--effort", session.effort);
     // A fresh start: old text on the screen must not be mistaken for a new question.
     session.ready = false;
     session.trustAsked = false;
