@@ -507,6 +507,20 @@ Rewritten:`);
     return `${task}\n\n(For context, what was just said between him and Jarvis, his voice assistant:\n${lines.join("\n")})`;
   }
 
+  // What he and Jarvis were just talking about, for Claude when he says "claude" to bring it in.
+  // Nothing if there's nothing new since Claude last heard, or if it mentions a secret.
+  private briefForClaude(): string | null {
+    const fresh = Math.min(this.unseen, CONTEXT_LINES, this.history.length);
+    const lines = this.history.slice(-fresh);
+    if (!lines.some((line) => line.role === "user")) return null;
+    if (lines.some((line) => containsSecret(line.content))) return null;
+    const talk = lines.map((line) => {
+      const text = line.content.length > LINE_LIMIT ? `${line.content.slice(0, LINE_LIMIT)}...` : line.content;
+      return `${line.role === "user" ? "He said" : "Jarvis said"}: ${text}`;
+    });
+    return `He said "claude" to bring you in on what he and Jarvis, his voice assistant, were just talking about. Take it from there: if something on his computer needs fixing, look into it and fix it, asking before you change anything.\n\nThe conversation:\n${talk.join("\n")}`;
+  }
+
   // Runs an approved small job without holding up the conversation, and says how it went.
   private pendingBackground(command: string, background?: boolean): boolean {
     if (!background) return false;
@@ -812,7 +826,16 @@ Rewritten:`);
         claude.setVisible?.(true);
         return this.finish(said, `Here's Claude, sir, in ${claude.openProject === "Computer" ? "your home folder" : claude.openProject}.`, "fast", begin, "claude_control");
       }
-      if (!this.ctx.dryRun) claude.start("Computer", homedir());
+      // Said after talking something through, Claude gets that conversation and takes it from there.
+      const brief = this.briefForClaude();
+      if (!this.ctx.dryRun) {
+        claude.start("Computer", homedir());
+        if (brief) claude.ask(brief);
+      }
+      if (brief) {
+        log({ said, tool: "claude_task", source: "fast", dryRun: this.ctx.dryRun });
+        return this.finish(said, "Claude's on it, sir. I've told it what we were talking about, and it will ask before changing anything.", "fast", begin, "claude_task");
+      }
       return this.finish(said, "Opening Claude in your home folder, sir.", "fast", begin, "start_coding");
     }
 

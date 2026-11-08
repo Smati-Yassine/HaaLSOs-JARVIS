@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import headless from "@xterm/headless";
 
 import { askClaudeOnce, depthOf, needsDeep } from "./thinker.ts";
-import { parseUnderstanding, understandPrompt } from "./understand.ts";
+import { parseUnderstanding, understandPrompt, UNDERSTAND } from "./understand.ts";
 import { approvalTitle, judge, packagesExist, parsePlan, withPkexec } from "./computer.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
@@ -865,6 +865,23 @@ test("typing claude opens the home folder, or shows Claude if it's already open"
   assert.equal(started.length, 1);
 });
 
+test("saying claude after talking something through hands Claude that conversation", async () => {
+  const sent: string[] = [];
+  const started: string[] = [];
+  const claude = { openProject: null as string | null, start(project: string) { started.push(project); claude.openProject = project; }, ask: (task: string) => { sent.push(task); return true; }, close() {} };
+  const thinker = async () => "The Discord app can't capture system audio on Linux, sir.";
+  const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"], thinker });
+  await jarvis.handle("why does my screen share in discord have no system sound?");
+  const reply = await jarvis.handle("claude");
+  assert.equal(reply.tool, "claude_task");
+  assert.match(reply.say, /told it what we were talking about/);
+  assert.deepEqual(started, ["Computer"]);
+  assert.match(sent[0], /^He said "claude" to bring you in[\s\S]*fix it, asking before you change anything[\s\S]*He said: why does my screen share in discord have no system sound\?\nJarvis said: /);
+  // Claude has heard it all now, so saying it again only shows Claude.
+  assert.match((await jarvis.handle("claude")).say, /Here's Claude/);
+  assert.equal(sent.length, 1);
+});
+
 test("a long message goes to Claude instead of reopening the open project", async () => {
   const asked: string[] = [];
   const started: string[] = [];
@@ -1503,12 +1520,16 @@ test("install vlc is planned, approved and run in the background, and a big job 
 
 test("a problem with the computer reaches Claude, and code problems stay code", () => {
   for (const said of ["fix my wifi driver", "fix my nvidia driver", "my laptop is really slow, fix it", "update my graphics driver", "can you fix my bluetooth", "troubleshoot my sound", "my wifi keeps disconnecting, can you fix it"]) assert.ok(isComputerFix(said), said);
-  for (const said of ["my sound isn't working", "the screen flickers sometimes", "bluetooth won't connect to my headphones", "my battery drains fast and the fan is loud"]) assert.ok(isComputerComplaint(said), said);
+  for (const said of [
+    "my sound isn't working", "the screen flickers sometimes", "bluetooth won't connect to my headphones", "my battery drains fast and the fan is loud",
+    "i have a question about linux\nwhy when i screen share in discord or screen record (of gnome) it has no system sound ?",
+    "screen recording on my laptop has no audio", "the mic doesn't pick up my voice",
+  ]) assert.ok(isComputerComplaint(said), said);
   for (const said of ["fix the login screen", "the settings page doesn't work", "fix the bug in the bluetooth module", "my app crashes on startup", "I love my laptop", "what's the weather"]) {
     assert.ok(!isComputerFix(said) && !isComputerComplaint(said), said);
   }
-  for (const said of ["fix it", "ok fix it", "please fix that", "go ahead and fix it", "sort it out"]) assert.ok(FIX_IT.test(said), said);
-  assert.ok(!FIX_IT.test("fix the footer"));
+  for (const said of ["fix it", "ok fix it", "please fix that", "go ahead and fix it", "sort it out", "is there any way i can fix it ?", "is there a way you could fix it", "can you fix it?", "how do I solve this", "so how can we fix the problem"]) assert.ok(FIX_IT.test(said), said);
+  for (const said of ["fix the footer", "can you fix the login page", "is there any way to make pasta"]) assert.ok(!FIX_IT.test(said), said);
 });
 
 test("a complaint gets advice, then 'fix it' sends Claude with the complaint, in the home folder or the open session", async () => {
@@ -1517,7 +1538,8 @@ test("a complaint gets advice, then 'fix it' sends Claude with the complaint, in
     const started: string[] = [];
     const prompts: string[] = [];
     const claude = { openProject: open as string | null, start: (project: string) => { started.push(project); }, close() {}, ask: (task: string) => { sent.push(task); return true; } };
-    const thinker = async (prompt: string, _on?: unknown, tier?: string, system?: string) => { prompts.push(`${tier}|${prompt}`); return system ? "CLAUDE" : "Probably the PipeWire output, sir. Check the output device. Say fix it to have Claude look into it."; };
+    // The planner hands the job to Claude. The understanding step finds no command in a lone "fix it".
+    const thinker = async (prompt: string, _on?: unknown, tier?: string, system?: string) => { prompts.push(`${tier}|${prompt}`); return system === UNDERSTAND ? "NONE" : system ? "CLAUDE" : "Probably the PipeWire output, sir. Check the output device. Say fix it to have Claude look into it."; };
     const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"], thinker });
     const advice = await jarvis.handle("my sound isn't working");
     assert.equal(advice.tool, "claude_answer");
@@ -1527,6 +1549,9 @@ test("a complaint gets advice, then 'fix it' sends Claude with the complaint, in
     assert.match(sent[0], /^fix it\n\n\(For context[\s\S]*He said: my sound isn't working/);
     if (open) assert.match(sent[0], /about his computer itself, not the luminelle project/);
     assert.deepEqual(started, open ? [] : ["Computer"]);
+    // Asked as a question, after a complaint, it's the same job.
+    await jarvis.handle("why when i screen share in discord it has no system sound ?");
+    assert.equal((await jarvis.handle("is there any way i can fix it ?")).tool, "claude_task");
     // "Fix it" without a complaint before it isn't a computer job.
     assert.notEqual((await jarvis.handle("fix it")).tool, "claude_task");
   }
