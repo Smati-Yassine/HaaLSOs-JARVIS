@@ -78,9 +78,25 @@ type Naming = { kind: "new"; moving: number | null } | { kind: "rename"; id: num
 type Confirm = { kind: "chat" | "folder"; id: number } | null;
 type MoveMenu = { chat: number; x: number; y: number } | null;
 
-export function Sidebar({ chats, folders, current, onOpen, onNew, onChanged, onDeleted }: {
+export type ClaudeSession = { id: string; title: string; updated: number };
+
+function ago(time: number): string {
+  const minutes = Math.round((Date.now() - time) / 60000);
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 1440) return `${Math.round(minutes / 60)}h`;
+  return `${Math.round(minutes / 1440)}d`;
+}
+
+// The id the Claude folder is remembered as open under. Real folders have positive ids.
+const CLAUDE_FOLDER = -1;
+
+export function Sidebar({ chats, folders, claudeSessions, activeClaude, onResume, current, onOpen, onNew, onChanged, onDeleted }: {
   chats: Chat[];
   folders: Folder[];
+  claudeSessions: ClaudeSession[];
+  activeClaude: string | null;
+  onResume(id: string): void;
   current: number | null;
   onOpen(id: number): void;
   onNew(): void;
@@ -339,6 +355,40 @@ export function Sidebar({ chats, folders, current, onOpen, onNew, onChanged, onD
         </button>
       </div>
       <div className="rail-scroll">
+        {claudeSessions.length > 0 && (
+          <div className="group">
+            <div
+              className="item folder-row claude-folder"
+              role="button"
+              tabIndex={0}
+              aria-expanded={open.has(CLAUDE_FOLDER)}
+              title="Claude sessions Jarvis ran for your computer, in your home folder"
+              onClick={() => toggle(CLAUDE_FOLDER)}
+              onKeyDown={onEnterOrSpace(() => toggle(CLAUDE_FOLDER))}
+            >
+              <Icon name="claude" />
+              <span className="t">Claude</span>
+              <span className="m">{claudeSessions.length}</span>
+              <span className="chev"><Icon name="chevron" /></span>
+            </div>
+            {open.has(CLAUDE_FOLDER) && claudeSessions.map((session) => (
+              <div
+                key={session.id}
+                className="item sub"
+                role="button"
+                tabIndex={0}
+                aria-current={session.id === activeClaude}
+                title={`${session.title}. Opens it in Claude.`}
+                onClick={() => onResume(session.id)}
+                onKeyDown={onEnterOrSpace(() => onResume(session.id))}
+              >
+                <Icon name="claude" />
+                <span className="t">{session.title}</span>
+                <span className="m">{ago(session.updated)}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {projectFolders.length > 0 && (
           <div>
             <div className="label">Projects</div>

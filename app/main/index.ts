@@ -475,6 +475,20 @@ ipcMain.on("claude:new-terminal", () => claude.newTerminal());
 ipcMain.on("claude:model", (_event, id: string, model: string) => claude.setModel(String(id), String(model)));
 ipcMain.on("claude:effort", (_event, id: string, effort: string) => claude.setEffort(String(id), String(effort)));
 ipcMain.on("claude:bypass", (_event, on: unknown) => claude.setBypass(on === true));
+// The Claude sessions Jarvis ran for the computer itself, in the home folder, for the sidebar.
+ipcMain.handle("claude:home-sessions", () => claude.storedSessions("Computer"));
+ipcMain.handle("claude:resume-home", (_event, id: unknown) => {
+  const open = claude.openProject;
+  // One project at a time, and closing one shuts Claude down mid-work, so that stays his call.
+  if (open && open !== "Computer") {
+    announce(`${open} is open, sir. Close it first, then I'll bring back that Claude session.`);
+    return false;
+  }
+  if (!open) claude.open("Computer", homedir());
+  claude.select(String(id));
+  toWindow({ type: "show-claude" });
+  return true;
+});
 ipcMain.on("claude:close-project", () => {
   const name = claude.openProject;
   closeClaude();

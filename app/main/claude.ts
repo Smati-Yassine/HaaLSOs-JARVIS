@@ -1049,6 +1049,14 @@ export class ClaudeManager {
     return this.readStore()[project] ?? [];
   }
 
+  // The sessions remembered for a project, without opening it: newest first, archived left out.
+  storedSessions(project: string): { id: string; title: string; updated: number }[] {
+    return this.load(project)
+      .filter((stored) => !stored.archived)
+      .sort((a, b) => b.updated - a.updated)
+      .map((stored) => ({ id: stored.id, title: plainPrompt(stored.title) || stored.title, updated: stored.updated }));
+  }
+
   private remember(session: Session) {
     if (!this.project || session.kind !== "claude" || session.title === "New session") return;
     const store = this.readStore();

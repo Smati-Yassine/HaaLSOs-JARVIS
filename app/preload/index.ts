@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld("claude", {
   setEffort: (id: string, effort: string) => send("claude:effort", id, effort),
   setBypass: (on: boolean) => send("claude:bypass", on),
   closeProject: () => send("claude:close-project"),
+  homeSessions: () => ipcRenderer.invoke("claude:home-sessions"),
+  resumeHome: (id: string) => ipcRenderer.invoke("claude:resume-home", id),
   onChange: (listener: (snapshot: unknown) => void) => {
     const handler = (_event: unknown, snapshot: unknown) => listener(snapshot);
     ipcRenderer.on("claude:changed", handler);

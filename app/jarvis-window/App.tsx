@@ -1,7 +1,7 @@
 import gsap from "gsap";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
-import { ClaudeWorkspace, type Snapshot } from "./ClaudePanel";
+import { ClaudeWorkspace, type HomeSession, type Snapshot } from "./ClaudePanel";
 import { Icon } from "./icons";
 import { VoiceLine, type Mood } from "./Line";
 import { Sidebar, type Chat, type Folder } from "./Sidebar";
@@ -315,6 +315,7 @@ export function App() {
   const [choosing, setChoosing] = useState(false);
   const [chats, setChats] = useState<Chat[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
+  const [homeSessions, setHomeSessions] = useState<HomeSession[]>([]);
   const [currentChat, setCurrentChat] = useState<number | null>(null);
   const [mode, setMode] = useState(savedMode);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -474,7 +475,18 @@ export function App() {
   useEffect(() => {
     window.jarvis.getAutostart().then(setAutostart);
     window.claude.snapshot().then(setClaude);
-    return window.claude.onChange(setClaude);
+    window.claude.homeSessions().then(setHomeSessions);
+    // A session's title and order change as Claude works, so the list follows along.
+    let timer = 0;
+    const off = window.claude.onChange((snapshot) => {
+      setClaude(snapshot);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => window.claude.homeSessions().then(setHomeSessions), 400);
+    });
+    return () => {
+      off();
+      window.clearTimeout(timer);
+    };
   }, []);
 
   // A newly opened project always shows Claude.
@@ -705,6 +717,9 @@ export function App() {
       <Sidebar
         chats={chats}
         folders={folders}
+        claudeSessions={homeSessions}
+        activeClaude={claude?.project === "Computer" && showWork ? claude.active : null}
+        onResume={(id) => window.claude.resumeHome(id)}
         current={currentChat}
         onOpen={openChat}
         onNew={newChat}

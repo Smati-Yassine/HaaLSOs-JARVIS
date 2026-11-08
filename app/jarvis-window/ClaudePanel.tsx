@@ -22,6 +22,8 @@ type Session = {
   minutes: number;
   elsewhere: boolean;
 };
+// A Claude session Jarvis ran for the computer itself, saved in ~/.Jarvis.
+export type HomeSession = { id: string; title: string; updated: number };
 export type Snapshot = {
   project: string | null;
   path: string | null;
@@ -49,6 +51,8 @@ declare global {
       setEffort(id: string, effort: string): void;
       setBypass(on: boolean): void;
       closeProject(): void;
+      homeSessions(): Promise<HomeSession[]>;
+      resumeHome(id: string): Promise<boolean>;
       onChange(listener: (snapshot: Snapshot) => void): () => void;
       onData(listener: (id: string, data: string, end: number) => void): () => void;
     };
