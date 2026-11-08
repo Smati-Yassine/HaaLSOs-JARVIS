@@ -4,15 +4,17 @@ version = "0.1.0"
 description = "Local speech for Jarvis: wake word, speech to text and voice"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "faster-whisper",
   "sherpa-onnx",
-  "piper-tts",
   "openwakeword",
   "onnxruntime",
   "soundfile",
   "numpy",
   "kokoro-onnx>=0.6.1",
 ]
+
+[dependency-groups]
+# Only for speech_bench.py, which compared these against Parakeet and Kokoro.
+bench = ["faster-whisper", "piper-tts"]
 
 [tool.uv]
 package = false

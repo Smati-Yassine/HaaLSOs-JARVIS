@@ -5,7 +5,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { OLLAMA, SMALL_MODEL } from "./ollama.ts";
 import { PROJECTS_ROOT } from "./projects.ts";
+import { IMAGE } from "./web.ts";
 import { listWindows } from "./windows.ts";
 
 const run = promisify(execFile);
@@ -15,9 +17,9 @@ const HOME = join(homedir(), ".Jarvis");
 export async function healthCheck(voiceFolder: string): Promise<string[]> {
   const problems: string[] = [];
   try {
-    const response = await fetch("http://localhost:11434/api/tags", { signal: AbortSignal.timeout(3000) });
+    const response = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(3000) });
     const { models } = (await response.json()) as { models: { name: string }[] };
-    if (!models.some((model) => model.name === "qwen3.5:2b")) problems.push("the Ollama model is missing, so run: ollama pull qwen3.5:2b");
+    if (!models.some((model) => model.name === SMALL_MODEL)) problems.push(`the Ollama model is missing, so run: ollama pull ${SMALL_MODEL}`);
   } catch {
     problems.push("Ollama isn't running, so I can only do simple commands");
   }
@@ -27,7 +29,7 @@ export async function healthCheck(voiceFolder: string): Promise<string[]> {
     join(HOME, "models", "openwakeword", "hey_jarvis_v0.1.onnx"),
   ];
   if (!voice.every(existsSync)) problems.push("some voice files are missing, so I can't listen or speak");
-  await run("docker", ["image", "inspect", "searxng/searxng:latest"]).catch(() => problems.push("my web search isn't set up, so I can't read web answers aloud"));
+  await run("docker", ["image", "inspect", IMAGE]).catch(() => problems.push("my web search isn't set up, so I can't read web answers aloud"));
   await run("bash", ["-lc", "command -v claude"]).catch(() => problems.push("I can't find Claude Code, so coding won't work"));
   await listWindows().catch(() => problems.push("the Window Control extension isn't active, so I can't minimize or maximize windows"));
   if (!existsSync(PROJECTS_ROOT)) problems.push(`I can't find your projects folder at ${PROJECTS_ROOT}`);

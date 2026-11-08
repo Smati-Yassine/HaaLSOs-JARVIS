@@ -8,6 +8,7 @@ Test mode: --input-file WAV [WAV ...] plays recordings into the pipeline instead
 microphone, and --silent skips playing sound.
 """
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -38,6 +39,16 @@ GIVE_UP_AFTER = 6.0
 MAX_COMMAND = 15.0
 ECHO_SETTLE = 0.25  # Seconds to ignore after Jarvis stops, while his voice fades from the mic.
 PRE_ROLL = 0.8  # Voice detection reacts late, so keep what came just before it.
+
+# Sound already made for a sentence is kept on disk, so a reply said before plays at once.
+SOUND_CACHE = Path.home() / ".Jarvis" / "cache" / "voice"
+SOUND_CACHE_KEEP = 500  # Files, about 100 KB each.
+CACHE_UP_TO = 120  # Characters. Longer sentences are answers, which rarely come back word for word.
+VOICE_ID = "bm_george+bm_daniel/0.5/1.0/en-gb/kokoro-v1.0"
+# Nothing can play until the first piece is made, at about half a second per second of speech.
+# So when Jarvis is silent, a long sentence is made in parts split at its commas.
+SPLIT_OVER = 70
+PIECE_AT_LEAST = 25
 
 COMMON = ["Yes, sir?", "Right away, sir.", "Done, sir.", "Cancelled, sir.", "Let me check, sir."]
 
@@ -74,17 +85,68 @@ class Mouth:
         self.player = None
         self.lock = threading.Lock()
         self.busy = threading.Event()
+        self.playing = False
         self.naming = False
         self.name_quiet_until = 0.0
         self.cache = {}
+        SOUND_CACHE.mkdir(parents=True, exist_ok=True)
+        self._prune_cache()
         for phrase in COMMON:
-            self.cache[phrase] = self._synth(phrase)
+            self.cache[phrase] = self._sound(phrase)
         threading.Thread(target=self._make, daemon=True).start()
         threading.Thread(target=self._run, daemon=True).start()
 
     def _synth(self, text):
         audio, _ = self.kokoro.create(text, voice=self.style, speed=1.0, lang="en-gb")
         return audio
+
+    @staticmethod
+    def _cache_path(text):
+        return SOUND_CACHE / (hashlib.sha1(f"{VOICE_ID}|{text}".encode()).hexdigest() + ".npy")
+
+    def _sound(self, text):
+        """The sentence's sound, from disk if it was made before."""
+        cacheable = len(text) <= CACHE_UP_TO
+        path = self._cache_path(text)
+        if cacheable:
+            try:
+                audio = np.load(path)
+                os.utime(path)  # Recently used, so it's kept longest.
+                return audio
+            except (OSError, ValueError):
+                pass
+        audio = self._synth(text)
+        if cacheable:
+            try:
+                temp = path.with_suffix(".tmp.npy")
+                np.save(temp, audio.astype(np.float32))
+                os.replace(temp, path)
+            except OSError:
+                pass  # A full disk shouldn't stop him talking.
+        return audio
+
+    @staticmethod
+    def _prune_cache():
+        try:
+            files = sorted(SOUND_CACHE.glob("*.npy"), key=lambda path: path.stat().st_mtime, reverse=True)
+            for old in files[SOUND_CACHE_KEEP:]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    @staticmethod
+    def pieces(sentence):
+        """A long sentence split at commas and the like, with no piece too short to sound natural."""
+        if len(sentence) <= SPLIT_OVER:
+            return [sentence]
+        parts = re.split(r"(?<=[,;:])\s+|\s+(?=[—–]\s)", sentence)
+        pieces = []
+        for part in parts:
+            if pieces and (len(pieces[-1]) < PIECE_AT_LEAST or len(part) < PIECE_AT_LEAST):
+                pieces[-1] = f"{pieces[-1]} {part}"
+            else:
+                pieces.append(part)
+        return pieces
 
     @staticmethod
     def sentences(text):
@@ -137,16 +199,20 @@ class Mouth:
             generation, text, then_listen, more, tag = self.jobs.get()
             begin = time.perf_counter()
             for sentence in self.sentences(text):
-                if generation != self.generation:
-                    break
-                audio = self.cache.get(sentence)
-                if audio is None:
-                    try:
-                        audio = self._synth(sentence)
-                    except Exception as error:  # A bad sentence shouldn't kill the voice.
-                        emit("error", message=f"voice: {error}")
-                        continue
-                self.ready.put(("audio", generation, audio, begin, sentence, tag))
+                # Someone is waiting in silence only when nothing is playing or ready to play.
+                silent = not self.playing and self.ready.empty()
+                cached = sentence in self.cache or (len(sentence) <= CACHE_UP_TO and self._cache_path(sentence).exists())
+                for piece in (self.pieces(sentence) if silent and not cached else [sentence]):
+                    if generation != self.generation:
+                        break
+                    audio = self.cache.get(piece)
+                    if audio is None:
+                        try:
+                            audio = self._sound(piece)
+                        except Exception as error:  # A bad sentence shouldn't kill the voice.
+                            emit("error", message=f"voice: {error}")
+                            continue
+                    self.ready.put(("audio", generation, audio, begin, piece, tag))
             self.ready.put(("end", generation, then_listen, more, tag))
 
     def _run(self):
@@ -163,7 +229,9 @@ class Mouth:
                 emit("saying", text=item[4], seconds=round(len(item[2]) / VOICE_RATE, 2), tag=item[5])
                 named = "jarvis" in item[4].lower()
                 self.naming = named
+                self.playing = True
                 self._play(item[2])
+                self.playing = False
                 self.naming = False
                 if named:
                     self.name_quiet_until = time.perf_counter() + OWN_NAME_QUIET

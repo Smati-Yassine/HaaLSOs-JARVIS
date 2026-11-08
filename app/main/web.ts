@@ -6,9 +6,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { ollamaChat } from "./ollama.ts";
+
 const run = promisify(execFile);
 const CONTAINER = "jarvis-searxng";
-const IMAGE = "searxng/searxng:latest";
+// Pinned to the exact version tested with Jarvis (2026-11-05), so an update can't change it unseen.
+export const IMAGE = "searxng/searxng@sha256:ffad724acd87b8dd312328d18da88ddd42e5c4b1d23231594662620053c13cae";
 const PORT = 8888;
 const SNIPPET = 400;
 
@@ -75,15 +78,10 @@ export async function webAnswer(question: string, model: string, results?: WebRe
   results ??= (await searchWeb(question)) ?? undefined;
   if (!results) return null;
   if (!results.length) return "";
-  const reply = await fetch("http://localhost:11434/api/chat", {
-    method: "POST",
-    signal: AbortSignal.timeout(20_000),
-    body: JSON.stringify({
-      model, stream: false, think: false, keep_alive: -1,
-      options: { temperature: 0, num_ctx: 4096, num_predict: 100 },
-      messages: [{ role: "user", content: answerPrompt(question, results) }],
-    }),
-  });
-  const { message } = (await reply.json()) as { message: { content?: string } };
+  const { message } = await ollamaChat({
+    model, keep_alive: -1,
+    options: { temperature: 0, num_predict: 100 },
+    messages: [{ role: "user", content: answerPrompt(question, results) }],
+  }, 20_000);
   return (message.content ?? "").trim();
 }

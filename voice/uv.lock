@@ -269,26 +269,34 @@ name = "jarvis-voice"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "faster-whisper" },
     { name = "kokoro-onnx" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "openwakeword" },
-    { name = "piper-tts" },
     { name = "sherpa-onnx" },
     { name = "soundfile" },
 ]
 
+[package.dev-dependencies]
+bench = [
+    { name = "faster-whisper" },
+    { name = "piper-tts" },
+]
+
 [package.metadata]
 requires-dist = [
-    { name = "faster-whisper" },
     { name = "kokoro-onnx", specifier = ">=0.6.1" },
     { name = "numpy" },
     { name = "onnxruntime" },
     { name = "openwakeword" },
-    { name = "piper-tts" },
     { name = "sherpa-onnx" },
     { name = "soundfile" },
+]
+
+[package.metadata.requires-dev]
+bench = [
+    { name = "faster-whisper" },
+    { name = "piper-tts" },
 ]
 
 [[package]]

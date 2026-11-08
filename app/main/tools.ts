@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import type { Memory } from "./memory.ts";
 import { findProject, listProjects, PROJECTS_ROOT, validProjectName } from "./projects.ts";
 import { classify, type Level } from "./safety.ts";
+import { SMALL_MODEL } from "./ollama.ts";
 import { answerPrompt, searchWeb, webAnswer } from "./web.ts";
 import { controlWindow, knownAction, listWindows, NOT_INSTALLED, pickWindow } from "./windows.ts";
 
@@ -255,7 +256,7 @@ async function askWeb(args: Args, ctx: Context): Promise<Result> {
       speech?.end();
       if (best) return { ok: true, say: best.replace(/\*\*?|`/g, "").trim(), spoken: speech?.spoke ? "" : undefined };
     }
-    const answer = await webAnswer(question, "qwen3.5:2b", results);
+    const answer = await webAnswer(question, SMALL_MODEL, results);
     return { ok: true, say: answer || "I couldn't find anything on that, sir." };
   } catch {
     return { ok: false, say: "My web search isn't running right now, sir. Say google if you want it in Brave." };
