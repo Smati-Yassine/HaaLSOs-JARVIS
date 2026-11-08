@@ -10,7 +10,6 @@ import { Jarvis, pruneLog, summarize, unloadModel, type Pending, type Reply } fr
 import { ClaudeManager, describeActivity, type Gate } from "./claude.ts";
 import { pickOption } from "./fastpath.ts";
 import { Memory } from "./memory.ts";
-import { listProjects } from "./projects.ts";
 import { classifyForClaude, isApproval, isPlainYes } from "./safety.ts";
 import { healthCheck, setStartAtLogin, startsAtLogin } from "./system.ts";
 import { Voice, type VoiceEvent } from "./voice.ts";
@@ -258,6 +257,8 @@ jarvis.connectClaude({
   },
   start(project, path) {
     claude.open(project, path);
+    // The chat that opened a project files itself in that project's folder. Computer jobs aren't a project.
+    if (project !== "Computer") memory.fileIntoProject(project);
   },
   ask(task) {
     return claude.ask(task);
@@ -431,7 +432,11 @@ ipcMain.handle("jarvis:choose", (_event, index: unknown, label: unknown) => {
   speakReply(tagged);
   return tagged;
 });
-ipcMain.handle("chats:list", () => ({ chats: memory.chats(), current: memory.currentChat }));
+ipcMain.handle("chats:list", () => ({ chats: memory.chats(), folders: memory.folders(), current: memory.currentChat }));
+ipcMain.handle("folders:create", (_event, name: unknown) => memory.createFolder(String(name ?? "")));
+ipcMain.handle("folders:rename", (_event, id: unknown, name: unknown) => memory.renameFolder(Number(id), String(name ?? "")));
+ipcMain.handle("folders:delete", (_event, id: unknown) => memory.deleteFolder(Number(id)));
+ipcMain.handle("chats:move", (_event, chat: unknown, folder: unknown) => memory.moveChat(Number(chat), folder === null ? null : Number(folder)));
 ipcMain.handle("chats:open", (_event, id: unknown) => jarvis.openChat(Number(id)));
 ipcMain.handle("chats:new", () => jarvis.startChat());
 ipcMain.handle("chats:delete", (_event, id: unknown) => jarvis.deleteChat(Number(id)));
@@ -439,14 +444,6 @@ ipcMain.handle("facts:list", () => memory.allFacts());
 ipcMain.handle("facts:delete", (_event, id: unknown) => jarvis.forgetFact(Number(id)));
 ipcMain.handle("reminders:list", () => memory.upcomingReminders());
 ipcMain.handle("reminders:delete", (_event, id: unknown) => memory.deleteReminder(Number(id)));
-// The folders the Claude button offers to open. Hidden folders are already left out.
-ipcMain.handle("projects:list", () => {
-  try {
-    return listProjects().sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base" }));
-  } catch {
-    return [];
-  }
-});
 ipcMain.handle("jarvis:warm-up", () => jarvis.warmUp().then(() => true, () => false));
 ipcMain.handle("jarvis:welcome", (_event, text: unknown) => {
   const tag = voiceReady ? nextTag() : undefined;

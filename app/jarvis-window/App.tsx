@@ -4,11 +4,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Pointer
 import { ClaudeWorkspace, type Snapshot } from "./ClaudePanel";
 import { Icon } from "./icons";
 import { VoiceLine, type Mood } from "./Line";
+import { Sidebar, type Chat, type Folder } from "./Sidebar";
 
 type Pending = { command: string; level: "run" | "say-back" | "confirm"; options?: string[]; title?: string };
 type Reply = { say: string; source: string; tool?: string; pending?: Pending; ms: number; tag?: number };
 type Turn = { role: "user" | "jarvis"; text: string };
-type Chat = { id: number; title: string; updated: number; turns: number };
 type Fact = { id: number; text: string };
 // A restored message is shown as it is, without the letters resolving again.
 // A spoken message is live while the voice says it: each sentence appears as it's said, over
@@ -38,15 +38,18 @@ declare global {
     jarvis: {
       ask(said: string): Promise<Reply>;
       choose(index: number, label: string): Promise<Reply>;
-      listChats(): Promise<{ chats: Chat[]; current: number | null }>;
+      listChats(): Promise<{ chats: Chat[]; folders: Folder[]; current: number | null }>;
       openChat(id: number): Promise<Turn[]>;
       newChat(): Promise<void>;
       deleteChat(id: number): Promise<void>;
+      moveChat(chat: number, folder: number | null): Promise<void>;
+      createFolder(name: string): Promise<number>;
+      renameFolder(id: number, name: string): Promise<void>;
+      deleteFolder(id: number): Promise<void>;
       listFacts(): Promise<Fact[]>;
       deleteFact(id: number): Promise<void>;
       reminders(): Promise<Reminder[]>;
       deleteReminder(id: number): Promise<void>;
-      listProjects(): Promise<string[]>;
       warmUp(): Promise<boolean>;
       welcome(text: string): Promise<number | undefined>;
       setTheme(mode: ThemeMode): Promise<void>;
@@ -74,16 +77,6 @@ function savedMode(): ThemeMode {
     return "dark";
   }
 }
-
-const DAY = 86_400_000;
-function dayOf(time: number): string {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  if (time >= start.getTime()) return "Today";
-  if (time >= start.getTime() - DAY) return "Yesterday";
-  return new Date(time).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-}
-const clock = (time: number) => new Date(time).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 
 const asMessages = (turns: Turn[]): Message[] => turns.map((turn) => ({ id: nextId++, from: turn.role === "user" ? "you" : "jarvis", text: turn.text, restored: true }));
 
@@ -198,76 +191,6 @@ function Decision({ pending, fromClaude, onChoose, onSay }: { pending: Pending; 
   );
 }
 
-// Past conversations, grouped by day. Deleting asks once, in place.
-function Sidebar({ chats, current, onOpen, onNew, onDeleted }: { chats: Chat[]; current: number | null; onOpen(id: number): void; onNew(): void; onDeleted(): void }) {
-  const [confirming, setConfirming] = useState<number | null>(null);
-  const groups: [string, Chat[]][] = [];
-  for (const chat of [...chats].sort((a, b) => b.updated - a.updated)) {
-    const day = dayOf(chat.updated);
-    const group = groups.find(([name]) => name === day);
-    if (group) group[1].push(chat);
-    else groups.push([day, [chat]]);
-  }
-  return (
-    <aside className="rail" aria-label="Conversations">
-      <div className="rail-head">
-        <button type="button" className="btn wide" onClick={onNew}><Icon name="plus" />New conversation</button>
-      </div>
-      <div className="rail-scroll">
-        {groups.length === 0 && <p className="empty-note">Your conversations will appear here.</p>}
-        {groups.map(([day, list]) => (
-          <div key={day}>
-            <div className="label">{day}</div>
-            <div className="group">
-              {list.map((chat) => confirming === chat.id ? (
-                <div key={chat.id} className="item confirm">
-                  <span className="t">Delete for good?</span>
-                  <button
-                    type="button"
-                    className="mini danger"
-                    onClick={() => {
-                      setConfirming(null);
-                      window.jarvis.deleteChat(chat.id).then(onDeleted);
-                    }}
-                  >
-                    Delete
-                  </button>
-                  <button type="button" className="mini" onClick={() => setConfirming(null)}>Keep</button>
-                </div>
-              ) : (
-                <div key={chat.id} className="item" role="button" tabIndex={0} aria-current={chat.id === current} title={chat.title}
-                  onClick={() => onOpen(chat.id)}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    onOpen(chat.id);
-                  }}
-                >
-                  <Icon name="chat" />
-                  <span className="t">{chat.title}</span>
-                  {day === "Today" && <span className="m">{clock(chat.updated)}</span>}
-                  <button
-                    type="button"
-                    className="x"
-                    aria-label={`Delete ${chat.title}`}
-                    title="Delete"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setConfirming(chat.id);
-                    }}
-                  >
-                    <Icon name="trash" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </aside>
-  );
-}
-
 function Setting({ title, about, children }: { title: string; about: string; children: ReactNode }) {
   return (
     <div className="setting">
@@ -377,43 +300,6 @@ function Settings({ mode, setMode, autostart, setAutostart, voice, setMuted, byp
   );
 }
 
-// With no project open, the Claude button lists the folders in the projects folder.
-function ProjectMenu({ onPick, onClose }: { onPick(name: string): void; onClose(): void }) {
-  const [projects, setProjects] = useState<string[] | null>(null);
-  useEffect(() => {
-    window.jarvis.listProjects().then(setProjects, () => setProjects([]));
-    const away = (event: PointerEvent) => {
-      if (!(event.target as HTMLElement).closest(".pop, .open-claude")) onClose();
-    };
-    const esc = (event: KeyboardEvent) => event.key === "Escape" && onClose();
-    window.addEventListener("pointerdown", away);
-    window.addEventListener("keydown", esc);
-    return () => {
-      window.removeEventListener("pointerdown", away);
-      window.removeEventListener("keydown", esc);
-    };
-  }, [onClose]);
-  return (
-    <div className="pop project-pop" role="menu" aria-label="Open a project">
-      <div className="pop-head">
-        <b>Open a project</b>
-        <span>Or say "let's start coding" and its name.</span>
-      </div>
-      <hr />
-      <div className="pop-list">
-        {projects === null && <p className="pop-note">Looking…</p>}
-        {projects?.length === 0 && <p className="pop-note">No folders in ~/Documents/Projects yet.</p>}
-        {projects?.map((name) => (
-          <button key={name} type="button" role="menuitem" onClick={() => onPick(name)}>
-            <Icon name="folder" />
-            <span>{name}</span>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
@@ -428,6 +314,7 @@ export function App() {
   const [claudeAsking, setClaudeAsking] = useState(false);
   const [choosing, setChoosing] = useState(false);
   const [chats, setChats] = useState<Chat[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [currentChat, setCurrentChat] = useState<number | null>(null);
   const [mode, setMode] = useState(savedMode);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -437,7 +324,6 @@ export function App() {
   const [claude, setClaude] = useState<Snapshot | null>(null);
   const [workOpen, setWorkOpen] = useState(true);
   const [railOpen, setRailOpen] = useState(false);
-  const [projectMenu, setProjectMenu] = useState(false);
   const claudeNow = useRef<Snapshot | null>(null);
   claudeNow.current = claude;
   const win = useRef<HTMLDivElement>(null);
@@ -594,10 +480,7 @@ export function App() {
   // A newly opened project always shows Claude.
   const openProject = claude?.project ?? null;
   useEffect(() => {
-    if (openProject) {
-      setWorkOpen(true);
-      setProjectMenu(false);
-    }
+    if (openProject) setWorkOpen(true);
     setChoosing(false);
   }, [openProject]);
 
@@ -616,6 +499,7 @@ export function App() {
   const refreshChats = useCallback(() => {
     window.jarvis.listChats().then((list) => {
       setChats(list.chats);
+      setFolders(list.folders);
       setCurrentChat(list.current);
     });
   }, []);
@@ -800,34 +684,40 @@ export function App() {
         <button type="button" className="tb-btn menu-btn" aria-label="Conversations" title="Conversations" onClick={() => setRailOpen((open) => !open)}><Icon name="menu" /></button>
         <div className="mark"><i />JARVIS</div>
         <div className="grow" />
-        <div className="tb-anchor">
+        {openProject && (
           <button
             type="button"
             className="tb-btn open-claude"
             aria-pressed={showWork}
-            aria-label={openProject ? (workOpen ? "Hide Claude" : "Show Claude") : "Open a project"}
-            title={openProject ? (workOpen ? "Hide Claude" : "Show Claude") : "Open a project"}
-            onClick={() => (openProject ? setWorkOpen((open) => !open) : setProjectMenu((open) => !open))}
+            aria-label={workOpen ? "Hide Claude" : "Show Claude"}
+            title={workOpen ? "Hide Claude" : "Show Claude"}
+            onClick={() => setWorkOpen((open) => !open)}
           >
             <Icon name="claude" />
           </button>
-          {projectMenu && !openProject && (
-            <ProjectMenu
-              onClose={() => setProjectMenu(false)}
-              onPick={(name) => {
-                setProjectMenu(false);
-                send(`Let's start coding ${name}`);
-              }}
-            />
-          )}
-        </div>
+        )}
         <button type="button" className="tb-btn" aria-label="Settings" title="Settings" aria-pressed={settingsOpen} onClick={() => setSettingsOpen((open) => !open)}><Icon name="gear" /></button>
         <button type="button" className="tb-btn" aria-label="Minimize" title="Minimize" onClick={() => window.jarvis.minimize()}><Icon name="min" /></button>
         <button type="button" className="tb-btn" aria-label="Maximize" title="Maximize" onClick={() => window.jarvis.toggleMaximize()}><Icon name="max" /></button>
         <button type="button" className="tb-btn quit" aria-label="Close" title="Close" onClick={() => window.jarvis.close()}><Icon name="close" /></button>
       </header>
 
-      <Sidebar chats={chats} current={currentChat} onOpen={openChat} onNew={newChat} onDeleted={refreshChats} />
+      <Sidebar
+        chats={chats}
+        folders={folders}
+        current={currentChat}
+        onOpen={openChat}
+        onNew={newChat}
+        onChanged={refreshChats}
+        onDeleted={(id) => {
+          // Deleting the chat you're in leaves you in a fresh one, not looking at what's gone.
+          if (id === currentChat) {
+            setMessages([]);
+            setPending(null);
+          }
+          refreshChats();
+        }}
+      />
 
       <main className="chat" aria-label="Conversation with Jarvis" onPointerDown={() => railOpen && setRailOpen(false)}>
         <div className="chat-head"><div className="col"><h1>{chatTitle}</h1></div></div>

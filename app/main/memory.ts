@@ -8,7 +8,9 @@ const STOP_WORDS = new Set(["the", "and", "for", "that", "this", "with", "you", 
 const SECRET = /\b(password|passcode|passphrase|api[ -]?key|secret key|private key|access token|credit card|card number|pin code)\b/i;
 
 type Row = Record<string, unknown>;
-export type Chat = { id: number; title: string; updated: number; turns: number };
+export type Chat = { id: number; title: string; updated: number; turns: number; folder: number | null };
+// A folder holds chats. A project folder is made by Jarvis the first time a chat opens that project.
+export type Folder = { id: number; name: string; project: string | null };
 export type Turn = { role: "user" | "jarvis"; text: string };
 export type Fact = { id: number; text: string };
 export type Reminder = { kind: string; text: string; due: number };
@@ -34,6 +36,8 @@ export class Memory {
   private db: DatabaseSync;
   // The conversation being added to. One is only created when something is actually said.
   private current: number | null = null;
+  // The project folder the next new chat goes into, when a project opened before anything was said.
+  private fileNext: number | null = null;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -58,7 +62,10 @@ export class Memory {
         INSERT INTO turns_search(turns_search, rowid, text) VALUES ('delete', old.id, old.text); END;
       CREATE TABLE IF NOT EXISTS chats (id INTEGER PRIMARY KEY, title TEXT NOT NULL, updated INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, text TEXT NOT NULL, due INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS folders (id INTEGER PRIMARY KEY, name TEXT NOT NULL, project TEXT, created INTEGER NOT NULL);
     `);
+    const chatColumns = this.db.prepare("PRAGMA table_info(chats)").all() as Row[];
+    if (!chatColumns.some((column) => column.name === "folder")) this.db.exec("ALTER TABLE chats ADD COLUMN folder INTEGER");
     if (reindex) this.rebuildSearch();
     const columns = this.db.prepare("PRAGMA table_info(turns)").all() as Row[];
     if (!columns.some((column) => column.name === "chat")) this.db.exec("ALTER TABLE turns ADD COLUMN chat INTEGER");
@@ -190,7 +197,8 @@ export class Memory {
     if (containsSecret(text)) return;
     if (this.current === null) {
       if (role !== "user") return; // Nothing has been said in this conversation yet.
-      this.current = Number(this.db.prepare("INSERT INTO chats (title, updated) VALUES (?, ?)").run(titleFrom(text), now).lastInsertRowid);
+      this.current = Number(this.db.prepare("INSERT INTO chats (title, updated, folder) VALUES (?, ?, ?)").run(titleFrom(text), now, this.fileNext).lastInsertRowid);
+      this.fileNext = null;
     }
     this.db.prepare("INSERT INTO turns (role, text, created, chat) VALUES (?, ?, ?, ?)").run(role, text, now, this.current);
     this.db.prepare("UPDATE chats SET updated = ? WHERE id = ?").run(now, this.current);
@@ -202,13 +210,54 @@ export class Memory {
 
   startChat() {
     this.current = null;
+    this.fileNext = null;
   }
 
-  chats(limit = 100): Chat[] {
+  chats(limit = 200): Chat[] {
     const rows = this.db.prepare(`
-      SELECT c.id, c.title, c.updated, COUNT(t.id) AS turns FROM chats c JOIN turns t ON t.chat = c.id
+      SELECT c.id, c.title, c.updated, c.folder, COUNT(t.id) AS turns FROM chats c JOIN turns t ON t.chat = c.id
       GROUP BY c.id ORDER BY c.updated DESC, c.id DESC LIMIT ?`).all(limit) as Row[];
-    return rows.map((row) => ({ id: Number(row.id), title: String(row.title), updated: Number(row.updated), turns: Number(row.turns) }));
+    return rows.map((row) => ({
+      id: Number(row.id), title: String(row.title), updated: Number(row.updated), turns: Number(row.turns),
+      folder: row.folder === null || row.folder === undefined ? null : Number(row.folder),
+    }));
+  }
+
+  folders(): Folder[] {
+    const rows = this.db.prepare("SELECT id, name, project FROM folders ORDER BY project IS NOT NULL, name COLLATE NOCASE").all() as Row[];
+    return rows.map((row) => ({ id: Number(row.id), name: String(row.name), project: row.project === null ? null : String(row.project) }));
+  }
+
+  createFolder(name: string, project: string | null = null): number {
+    const clean = name.trim().slice(0, 60) || "New folder";
+    return Number(this.db.prepare("INSERT INTO folders (name, project, created) VALUES (?, ?, ?)").run(clean, project, Date.now()).lastInsertRowid);
+  }
+
+  renameFolder(id: number, name: string) {
+    const clean = name.trim().slice(0, 60);
+    if (clean) this.db.prepare("UPDATE folders SET name = ? WHERE id = ?").run(clean, id);
+  }
+
+  // The chats inside go back to the main list. Nothing said in them is deleted.
+  deleteFolder(id: number) {
+    this.db.prepare("UPDATE chats SET folder = NULL WHERE folder = ?").run(id);
+    this.db.prepare("DELETE FROM folders WHERE id = ?").run(id);
+  }
+
+  // null takes the chat out of its folder.
+  moveChat(chat: number, folder: number | null) {
+    if (folder !== null && !this.db.prepare("SELECT 1 FROM folders WHERE id = ?").get(folder)) return;
+    this.db.prepare("UPDATE chats SET folder = ? WHERE id = ?").run(folder, chat);
+  }
+
+  // The chat that opened a project goes into that project's folder, made the first time. A chat
+  // already in a folder stays where it was put. If nothing has been said yet, the chat files
+  // itself when it's created.
+  fileIntoProject(project: string) {
+    const found = this.db.prepare("SELECT id FROM folders WHERE project = ?").get(project) as Row | undefined;
+    const folder = found ? Number(found.id) : this.createFolder(project, project);
+    if (this.current === null) this.fileNext = folder;
+    else this.db.prepare("UPDATE chats SET folder = ? WHERE id = ? AND folder IS NULL").run(folder, this.current);
   }
 
   chatTurns(id: number): Turn[] {
@@ -220,6 +269,7 @@ export class Memory {
   openChat(id: number): boolean {
     if (!this.db.prepare("SELECT 1 FROM chats WHERE id = ?").get(id)) return false;
     this.current = id;
+    this.fileNext = null;
     return true;
   }
 

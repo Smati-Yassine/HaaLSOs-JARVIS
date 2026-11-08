@@ -693,6 +693,49 @@ test("conversations keep their own lines, and can be resumed and deleted", () =>
   assert.equal(memory.openChat(first), false);
 });
 
+test("chats go into folders, and a chat that opens a project files itself in that project's folder", () => {
+  const memory = new Memory(":memory:");
+  memory.addTurn("user", "plan the trip", 1000);
+  const trip = memory.currentChat!;
+  const travel = memory.createFolder("  Travel  ");
+  memory.moveChat(trip, travel);
+  memory.moveChat(trip, 999); // A folder that doesn't exist changes nothing.
+  assert.deepEqual(memory.folders(), [{ id: travel, name: "Travel", project: null }]);
+  assert.equal(memory.chats()[0].folder, travel);
+
+  // Opened in the middle of a chat: that chat moves in.
+  memory.startChat();
+  memory.addTurn("user", "let's start coding luminelle", 2000);
+  const coding = memory.currentChat!;
+  memory.fileIntoProject("luminelle");
+  const project = memory.folders().find((folder) => folder.project === "luminelle")!;
+  assert.equal(memory.chats().find((chat) => chat.id === coding)!.folder, project.id);
+
+  // Opened before anything was said: the chat files itself when it starts, in the same folder.
+  memory.startChat();
+  memory.fileIntoProject("luminelle");
+  memory.addTurn("user", "open luminelle again", 3000);
+  assert.equal(memory.chats().find((chat) => chat.id === memory.currentChat)!.folder, project.id);
+  assert.equal(memory.folders().filter((folder) => folder.project === "luminelle").length, 1);
+
+  // A chat the user already filed stays where it is.
+  memory.openChat(trip);
+  memory.fileIntoProject("luminelle");
+  assert.equal(memory.chats().find((chat) => chat.id === trip)!.folder, travel);
+
+  // A new chat after that doesn't inherit the project.
+  memory.startChat();
+  memory.addTurn("user", "what time is it", 4000);
+  assert.equal(memory.chats().find((chat) => chat.id === memory.currentChat)!.folder, null);
+
+  memory.renameFolder(travel, "Holidays");
+  memory.renameFolder(travel, "   "); // A blank name is ignored.
+  assert.equal(memory.folders().find((folder) => folder.id === travel)!.name, "Holidays");
+  memory.deleteFolder(travel);
+  assert.equal(memory.chats().find((chat) => chat.id === trip)!.folder, null);
+  assert.deepEqual(memory.chatTurns(trip), [{ role: "user", text: "plan the trip" }]);
+});
+
 test("an older memory file keeps everything and gains conversations and better search", () => {
   const dir = mkdtempSync(joinPath(tmpdir(), "jarvis-old-memory-"));
   const path = joinPath(dir, "memory.sqlite");
