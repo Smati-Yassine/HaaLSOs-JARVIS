@@ -12,7 +12,7 @@ import { askClaudeOnce, depthOf, needsDeep } from "./thinker.ts";
 import { approvalTitle, judge, packagesExist, parsePlan, withPkexec } from "./computer.ts";
 import { abilityCall, calculate, describeLength, parseClock, parseDelay } from "./abilities.ts";
 import { summarize, isHesitation, isPastNarration, isPlainQuestion, isPlainTalk, isRepeat, isMessageForClaude, isRefusal, isStatementAboutSelf, Jarvis, splitGreeting, looksLikeFollowUp, parseTextCall, pruneLog, scrubLog, scrubSaid, speakable, tidyReply, toolFitsWords } from "./brain.ts";
-import { claudeAction, fastPath, linkCall, tellClaude, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
+import { claudeAction, fastPath, FIX_IT, isComputerComplaint, isComputerFix, linkCall, tellClaude, looksLikeCoding, pickOption, splitCommands } from "./fastpath.ts";
 import { describeActivity, describeStep, screenText, plainPrompt, resumeCost, claudeFolderName, outsideSessions, readMenu, sessionsInUse, sessionTitle, trustSelection } from "./claude.ts";
 import { containsSecret, lastingFacts, Memory, memoryCommand, searchTerms } from "./memory.ts";
 import { claudeShortcut, findProject, newProjectRequest, projectInSentence, projectIntent, validProjectName } from "./projects.ts";
@@ -1455,4 +1455,35 @@ test("install vlc is planned, approved and run in the background, and a big job 
   const made = new Jarvis({ dryRun: false, claude: { ...claude, start: startAgain }, thinker: answer("COMMAND: pkexec apt install -y nosuchpackagexyz") });
   assert.match((await made.handle("install nosuchpackagexyz")).say, /Claude handle that/);
   assert.equal(started.at(-1), "again");
+});
+
+test("a problem with the computer reaches Claude, and code problems stay code", () => {
+  for (const said of ["fix my wifi driver", "fix my nvidia driver", "my laptop is really slow, fix it", "update my graphics driver", "can you fix my bluetooth", "troubleshoot my sound", "my wifi keeps disconnecting, can you fix it"]) assert.ok(isComputerFix(said), said);
+  for (const said of ["my sound isn't working", "the screen flickers sometimes", "bluetooth won't connect to my headphones", "my battery drains fast and the fan is loud"]) assert.ok(isComputerComplaint(said), said);
+  for (const said of ["fix the login screen", "the settings page doesn't work", "fix the bug in the bluetooth module", "my app crashes on startup", "I love my laptop", "what's the weather"]) {
+    assert.ok(!isComputerFix(said) && !isComputerComplaint(said), said);
+  }
+  for (const said of ["fix it", "ok fix it", "please fix that", "go ahead and fix it", "sort it out"]) assert.ok(FIX_IT.test(said), said);
+  assert.ok(!FIX_IT.test("fix the footer"));
+});
+
+test("a complaint gets advice, then 'fix it' sends Claude with the complaint, in the home folder or the open session", async () => {
+  for (const open of [null, "luminelle"]) {
+    const sent: string[] = [];
+    const started: string[] = [];
+    const prompts: string[] = [];
+    const claude = { openProject: open as string | null, start: (project: string) => { started.push(project); }, close() {}, ask: (task: string) => { sent.push(task); return true; } };
+    const thinker = async (prompt: string, _on?: unknown, tier?: string, system?: string) => { prompts.push(`${tier}|${prompt}`); return system ? "CLAUDE" : "Probably the PipeWire output, sir. Check the output device. Say fix it to have Claude look into it."; };
+    const jarvis = new Jarvis({ dryRun: false, claude, projects: () => ["luminelle"], thinker });
+    const advice = await jarvis.handle("my sound isn't working");
+    assert.equal(advice.tool, "claude_answer");
+    assert.match(prompts[0], /^deep\|[\s\S]*say "fix it"/);
+    const fixing = await jarvis.handle("fix it");
+    assert.equal(fixing.tool, "claude_task");
+    assert.match(sent[0], /^fix it\n\n\(For context[\s\S]*He said: my sound isn't working/);
+    if (open) assert.match(sent[0], /about his computer itself, not the luminelle project/);
+    assert.deepEqual(started, open ? [] : ["Computer"]);
+    // "Fix it" without a complaint before it isn't a computer job.
+    assert.notEqual((await jarvis.handle("fix it")).tool, "claude_task");
+  }
 });

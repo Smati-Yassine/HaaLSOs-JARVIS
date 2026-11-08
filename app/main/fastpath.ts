@@ -129,6 +129,25 @@ export function fastPath(said: string): Call | null {
 const DOES = /^(add|fix|make|change|refactor|rename|update|implement|create|write|remove|debug|move|style|center)\b/i;
 const CODE_THING = /\b(navbar|nav bar|button|css|html|component|function|class|bug|api|endpoint|database|schema|login|signup|settings page|page|footer|header|sidebar|modal|form|route|test|tests|module|dark mode|layout|responsive|sticky)\b/i;
 // With a project open, any request to change something is for Claude.
+// Something wrong with the computer itself, not with code: drivers, wifi, sound and the like.
+const COMPUTER_PART = /\b(wi-?fi|internet|network|ethernet|bluetooth|sound|audio|speakers?|microphone|mic|headphones|headset|earbuds|drivers?|nvidia|amd|graphics( card| driver)?|gpu|keyboard|touchpad|trackpad|mouse|printer|webcam|camera|usb|battery|charging|charger|fan|laptop|computer|pc|ubuntu|linux|kernel|boot|booting|monitor|brightness|(my|the) (screen|display)|my (disk|drive|ram|memory|system|machine))\b/i;
+const GOING_WRONG = /\b(not working|isn'?t working|aren'?t working|doesn'?t work|don'?t work|won'?t|can'?t|cannot|stopped|keeps?|broken|broke|no sound|flicker\w*|slow|lag\w*|freez\w*|crash\w*|disconnect\w*|drops?|dropping|error|errors|fail\w*|problem|issue|glitch\w*|stuck|dead|overheat\w*|hot|loud|noisy|drain\w*|missing|not (detected|showing|found|connecting|charging))\b/i;
+const WANTS_FIX = /^(fix|repair|sort( out)?|troubleshoot|diagnose|look into|figure out|solve|resolve|update|upgrade|reinstall|install|set up|get)\b|\b(fix|repair|sort out|troubleshoot|look into|figure out|solve)\b/i;
+const ABOUT_CODE = /\b(code|app|page|component|function|module|bug in|test|tests|css|html|api|repo|project|feature|website|site|login|signup|button|ui)\b/i;
+
+// "Fix my wifi driver", "my laptop is slow, fix it": a job on the computer.
+export const isComputerFix = (said: string) => {
+  const text = clean(said);
+  return COMPUTER_PART.test(text) && WANTS_FIX.test(text) && !ABOUT_CODE.test(text) && (GOING_WRONG.test(text) || /\b(drivers?|nvidia|graphics|gpu|kernel|firmware|ubuntu|linux|bluetooth|wi-?fi|sound|audio|printer|webcam|battery)\b/i.test(text));
+};
+// "My sound isn't working": a complaint about the computer, with no request yet.
+export const isComputerComplaint = (said: string) => {
+  const text = clean(said);
+  return COMPUTER_PART.test(text) && GOING_WRONG.test(text) && !ABOUT_CODE.test(text) && !isComputerFix(said);
+};
+// "Fix it", after a complaint.
+export const FIX_IT = /^(?:(?:ok|okay|alright|then|so|yes|yeah|please)[,.]?\s+)*(?:(?:try to|go ahead and|please)\s+)?(?:fix|repair|sort(?: out)?|troubleshoot|look into|deal with|solve)\s+(?:it|that|this|them)(?:\s+(?:out|for me|please|then))*$/i;
+
 export const looksLikeCoding = (said: string, projectOpen = false) => DOES.test(clean(said)) && (projectOpen || CODE_THING.test(said));
 
 // "Open firefox and set the volume to 40" is two commands. Only splits when every part is a

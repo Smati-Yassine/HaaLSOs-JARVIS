@@ -179,6 +179,9 @@ export type Question = { question: string; options: string[]; simple: boolean };
 type Session = SessionView & { pty: IPty | null; buffer: string; sent: number; queued: string[]; started: number; ready: boolean; trustAsked: boolean; bypassAsked: boolean; gate: Gate | null; leftoverInput: boolean; screen: Screen | null; askSeq: number; resumeHandled: boolean; task: string | null; taskStarted: number; steps: string[]; finished: number; lastReport: string | null };
 
 // What Claude is up to, for Jarvis to tell him about.
+// Told to every session Jarvis starts. Its commands run with no terminal to type a password into.
+export const JARVIS_NOTE = "You are running inside Jarvis, his voice assistant, which reads your questions and permission prompts to him aloud. Commands you run have no terminal for a password, so sudo will fail: when root is needed, use pkexec instead, which shows him Ubuntu's password dialog.";
+
 export type Activity = { project: string | null; working: boolean; task: string | null; started: number; minutes: number; steps: string[]; report: string | null; finishedMinutesAgo: number | null };
 export type Plan = Snapshot["plan"];
 const MAX_STEPS = 30;
@@ -717,7 +720,7 @@ export class ClaudeManager {
   }
 
   private launchClaude(session: Session, resume: boolean) {
-    const args = ["--permission-mode", this.bypass ? "bypassPermissions" : "default", "--settings", SETTINGS];
+    const args = ["--permission-mode", this.bypass ? "bypassPermissions" : "default", "--settings", SETTINGS, "--append-system-prompt", JARVIS_NOTE];
     args.push(...(resume ? ["--resume", session.id] : ["--session-id", session.id]));
     if (session.model) args.push("--model", session.model);
     if (session.effort) args.push("--effort", session.effort);

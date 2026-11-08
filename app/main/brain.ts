@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { abilityCall } from "./abilities.ts";
-import { claudeAction, clean, fastPath, linkCall, looksLikeCoding, splitCommands, tellClaude, type Call } from "./fastpath.ts";
+import { claudeAction, clean, fastPath, FIX_IT, isComputerComplaint, isComputerFix, linkCall, looksLikeCoding, splitCommands, tellClaude, type Call } from "./fastpath.ts";
 import { containsSecret, lastingFacts, meaningfulWords, Memory, memoryCommand, type Turn } from "./memory.ts";
 import { claudeShortcut, findProject, listProjects, newProjectRequest, projectInSentence, projectIntent } from "./projects.ts";
 import { isApproval, isPlainYes, type Level } from "./safety.ts";
@@ -354,6 +354,8 @@ export class Jarvis {
   private lastDepth: Depth = "small";
   // Lines said since Jarvis last passed something to Claude: the only ones Claude hasn't seen.
   private unseen = 0;
+  // He just said something on the computer is wrong, so "fix it" means that.
+  private complaint = false;
 
   constructor(ctx: Context = { dryRun: false }, memory: Memory | null = null) {
     this.ctx = memory ? { ...ctx, reminders: ctx.reminders ?? memory } : ctx;
@@ -571,7 +573,7 @@ Rewritten:`);
 
   // A small job gets one command, checked and approved. Null means it needs a whole Claude session.
   private async planSmallJob(said: string, source: Reply["source"], begin: number): Promise<Reply | null> {
-    if (!this.ctx.thinker || this.ctx.claude?.openProject) return null;
+    if (!this.ctx.thinker) return null;
     const reply = await this.ctx.thinker(`About his computer: ${systemFacts()}\n\nHis request: ${said}`, undefined, "quick", PLANNER).catch(() => null);
     const planned = parsePlan(reply);
     if (!planned) return null;
@@ -580,6 +582,23 @@ Rewritten:`);
     if (!(await packagesExist(plan))) return null;
     log({ said, tool: "small_job", command, level: plan.level, source, dryRun: this.ctx.dryRun });
     return this.askFirst({ command, level: plan.level, title: approvalTitle(plan), background: true }, source, "small_job", begin);
+  }
+
+  // A job on the computer itself: one checked command if that's enough, otherwise Claude, in the
+  // home folder or, with a project open, in that session, told it's about the computer.
+  private async computerJob(said: string, begin: number): Promise<Reply> {
+    const task = this.withContext(said);
+    const small = await this.planSmallJob(task, "fast", begin);
+    if (small) return small;
+    const claude = this.ctx.claude!;
+    log({ said, tool: "claude_task", source: "fast", dryRun: this.ctx.dryRun });
+    const open = claude.openProject;
+    if (!this.ctx.dryRun) {
+      if (!open) claude.start("Computer", homedir());
+      claude.ask(open ? `${task}\n\n(This is about his computer itself, not the ${open} project.)` : task);
+    }
+    const reply = this.finish(said, "Right away, sir. I'll have Claude look into it. It will ask before changing anything.", "fast", begin, "claude_task");
+    return reply;
   }
 
   private async handToClaude(said: string, source: Reply["source"], begin: number): Promise<Reply> {
@@ -723,6 +742,11 @@ Rewritten:`);
     if (link) return this.runTool(link, "fast", said, begin);
     // "Tell Claude to ..." while a project is open is a task for it, unless it's "tell Claude to stop".
     if (this.ctx.claude?.openProject && tellClaude(said) && !claudeAction(said)) return this.runTool({ tool: "ask_claude", args: {} }, "fast", said, begin);
+    // Something wrong with the computer goes to whoever can actually fix it, never to small talk.
+    const fixAfterComplaint = this.complaint && FIX_IT.test(clean(said));
+    this.complaint = false;
+    if (this.ctx.claude && !narration && (isComputerFix(said) || fixAfterComplaint)) return this.computerJob(said, begin);
+    if (this.ctx.claude && !narration && isComputerComplaint(said)) this.complaint = true;
 
     const projects = this.projectNames();
     const mentioned = projectInSentence(clean(said), projects);
@@ -822,11 +846,13 @@ Rewritten:`);
       // repeats old actions: "yes" once re-ran a search. Actions then need their words present.
       // With nothing open, "ask claude about Rome" is a question. "Ask claude to fix it" is still a task.
       const namedClaude = !this.ctx.claude?.openProject && /^ask claude\s+(about|if|whether|what|why|how|who|when|where|which|is|are|should|can)\b/i.test(clean(said));
-      const { call } = isStatementAboutSelf(said) || namedClaude || plain ? { call: null } : await askModel([{ role: "user", content: asked }], notes);
+      const { call } = isStatementAboutSelf(said) || namedClaude || plain || this.complaint ? { call: null } : await askModel([{ role: "user", content: asked }], notes);
       if (call && toolFitsWords(call.tool, asked)) return this.runTool(call, "model", said, begin, asked);
       const words = namedClaude ? clean(said).replace(/^ask claude\s+(?:about\s+|if\s+|whether\s+)?/i, "") : clean(said);
       const context = this.context(said, notes);
-      let depth = namedClaude ? "serious" : depthOf(clean(said));
+      // A complaint about the computer deserves real advice, and the words to have it fixed.
+      let depth = namedClaude || this.complaint ? "serious" : depthOf(clean(said));
+      if (this.complaint) context.push(`Something on his computer is going wrong. Give him the likely cause and one or two things to check, and end by telling him he can say "fix it" to have Claude look into it on his computer.`);
       if (this.lastDepth !== "small" && looksLikeFollowUp(said)) depth = this.lastDepth;
       this.lastDepth = depth;
       // Questions go to Claude: the small local model invents facts. Small talk stays here, as he
@@ -835,7 +861,7 @@ Rewritten:`);
         const speech = this.ctx.speech?.();
         // When the answer is spoken as it comes, its first sentence is quicker than this would be.
         if (depth === "serious" && !speech) this.ctx.ack?.("One moment, sir.");
-        const tier = namedClaude || needsDeep(said) ? "deep" : "quick";
+        const tier = namedClaude || this.complaint || needsDeep(said) ? "deep" : "quick";
         const best = await this.ctx.thinker(this.forClaude(words, context), speech?.push, tier);
         speech?.end();
         if (best) {
