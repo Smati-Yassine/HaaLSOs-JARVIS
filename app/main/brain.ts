@@ -20,7 +20,8 @@ const DEEP_MODEL = "qwen3.5:9b";
 const logDir = () => process.env.JARVIS_LOG_DIR || join(homedir(), ".Jarvis", "logs");
 const commandLog = () => join(logDir(), "commands.jsonl");
 const LOG_DAYS = 30;
-const KEEP_TURNS = 12;
+// Lines of the conversation kept in mind. Claude is given all of them, so it follows the talk.
+const KEEP_TURNS = 30;
 
 const SYSTEM = `You are Jarvis, the user's personal assistant on his Linux computer. Address him as sir. \
 Keep spoken replies to one or two short sentences, with no emoji. Use a tool whenever the request is an action \
@@ -438,7 +439,7 @@ export class Jarvis {
 
   // The prompt for a question sent to Claude: the recent talk, and what's known that applies.
   private forClaude(said: string, context: string[]): string {
-    const talk = this.history.slice(-6).map((line) => `${line.role === "user" ? "He said" : "You said"}: ${line.content}`).join("\n");
+    const talk = this.history.map((line) => `${line.role === "user" ? "He said" : "You said"}: ${line.content}`).join("\n");
     return [...context, talk && `The conversation so far:\n${talk}`, `He now says: ${said}`].filter(Boolean).join("\n\n");
   }
 
@@ -668,7 +669,7 @@ Rewritten:`);
     // Just his name, with nothing after it. The model would only make something up.
     if (!clean(said)) return { ...this.finish(said, "Yes, sir?", "fast", begin), listen: true };
 
-    const whoAmI = identityAnswer(clean(said));
+    const whoAmI = this.ctx.thinker ? null : identityAnswer(clean(said));
     if (whoAmI) return this.finish(said, whoAmI, "fast", begin);
 
     const shortcut = this.ctx.claude ? claudeShortcut(clean(said), projects) : null;
@@ -764,6 +765,8 @@ Rewritten:`);
           return speech?.spoke ? { ...reply, spoken: "" } : reply;
         }
       }
+      const fixed = identityAnswer(clean(said));
+      if (fixed) return this.finish(said, fixed, "fast", begin);
       // The big model takes about ten seconds, so it's kept for reasoning, and for covering when
       // Claude can't answer (no plan left, or no internet).
       const useDeep = this.deepReady && (depth === "reasoning" || depth === "serious");
@@ -771,7 +774,7 @@ Rewritten:`);
       // A real question wants the right answer, and only small talk gets room to be clever.
       // The real time only confuses a puzzle: "a train leaves at 3" became 13:36.
       const background = depth === "reasoning" ? context.slice(1) : context;
-      const talk = [...this.history, { role: "user", content: said }];
+      const talk = [...this.history.slice(-12), { role: "user", content: said }]; // The small model has little room.
       let answer = await chatReply(talk, background, depth === "small" ? 0.6 : 0.1, useDeep);
       // The small model likes to reuse an example or its own last lines. Once more, looser.
       if (isRepeat(answer, this.history)) answer = await chatReply(talk, background, 1, useDeep);

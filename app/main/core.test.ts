@@ -1155,9 +1155,11 @@ test("facts and puzzles go to Claude too, and who built him never leaves the com
   const jarvis = new Jarvis({ dryRun: true, thinker: async () => { asked += 1; return "Lima, sir."; } });
   assert.equal((await jarvis.handle("who painted the Mona Lisa?")).tool, "claude_answer");
   assert.equal((await jarvis.handle("if I have 3 apples and eat one how many do I have?")).tool, "claude_answer");
-  const who = await jarvis.handle("who built you?");
-  assert.match(who.say, /You did, sir/);
-  assert.equal(asked, 2);
+  // Who built him goes to Claude, which follows the conversation. Without it, a fixed answer.
+  assert.equal((await jarvis.handle("who built you?")).tool, "claude_answer");
+  assert.equal(asked, 3);
+  assert.match((await new Jarvis({ dryRun: true }).handle("who built you?")).say, /You did, sir\. Yassine Smati/);
+  assert.match((await new Jarvis({ dryRun: true, thinker: async () => null }).handle("who built you?")).say, /You did, sir\. Yassine Smati/);
 });
 
 test("Claude's finished report is told by Claude, with the small model only as a fallback", async () => {
